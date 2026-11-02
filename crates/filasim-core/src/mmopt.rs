@@ -251,6 +251,15 @@ pub struct MmConfig {
     /// exceeds this value (MPa) are fixed stiff (the soft material would not
     /// carry that stress within its strain limit).
     pub keep_stiff_above_stress: Option<f64>,
+    /// Stop on the MEAN design change instead of the max (default false =
+    /// max, the original behavior).
+    pub converge_on_mean: bool,
+    /// Average consecutive designs `x ← ½(x_new + x)` from this iteration on
+    /// (kills OC 2-cycles). `None` = off (original).
+    pub damping_start: Option<usize>,
+    /// Geometric move-limit decay after iteration 10, floor 25 % of the
+    /// initial limit. Default false (original: constant limit).
+    pub move_limit_decay: bool,
 }
 
 impl MmConfig {
@@ -270,6 +279,9 @@ impl MmConfig {
             tol_change: 0.01,
             frozen_stiff: Vec::new(),
             keep_stiff_above_stress: None,
+            converge_on_mean: false,
+            damping_start: None,
+            move_limit_decay: false,
         }
     }
 }
@@ -279,7 +291,16 @@ pub struct MmIter {
     pub iteration: usize,
     pub penalty: f64,
     pub compliance: f64,
+    /// Max |Δx| over design cells (the original stopping measure).
     pub change: f64,
+    /// Mean |Δx| over design cells.
+    pub mean_change: f64,
+    /// Max |x_t − x_{t−2}|: small while `change` is large = a 2-cycle.
+    pub two_cycle: f64,
+    /// Cells with |Δx| > 0.05, and how many of those have a filtered ρ̃ in
+    /// the gray band (0.1, 0.9).
+    pub n_moving: usize,
+    pub n_moving_gray: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -300,8 +321,11 @@ pub struct MmResult {
     pub compliance_continuous: f64,
     /// Compliance of the binarized design, from an independent solve.
     pub compliance_binary: f64,
-    /// Share of design cells with ρ in (0.1, 0.9) before binarization.
+    /// Share of design cells with filtered ρ̃ in (0.1, 0.9) before binarization.
     pub gray_fraction: f64,
+    /// Same share, but for the UNFILTERED design variable x (shows how much
+    /// of the gray is only filter blur).
+    pub gray_fraction_design: f64,
     /// Cells held stiff by `frozen_stiff` or the strength prior.
     pub frozen_cells: usize,
 }
@@ -393,6 +417,7 @@ pub fn optimize_two_material(
         cfg.penalty_start + k as f64 * cfg.penalty_step
     };
     let final_phase_start = n_steps * cfg.iters_per_penalty.max(1);
+    let mut x_prev2 = x.clone();
     for it in 0..cfg.max_iter {
         iterations = it + 1;
         let p = p_of(it);
@@ -402,6 +427,11 @@ pub fn optimize_two_material(
         let g = filter.apply_t(&dc_t);
 
         // OC update, bisection on the multiplier so Σ scale·ρ̃ = s_max.
+        let ml = if cfg.move_limit_decay && it >= 10 {
+            (cfg.move_limit * 0.92f64.powi(it as i32 - 9)).max(0.25 * cfg.move_limit)
+        } else {
+            cfg.move_limit
+        };
         let (mut lo, mut hi) = (1e-30f64, 1e30f64);
         let mut x_new = x.clone();
         for _ in 0..100 {
@@ -409,7 +439,7 @@ pub fn optimize_two_material(
             for &i in &design {
                 let be = (-g[i]).max(0.0) / (lam * grid.scale[i] as f64);
                 x_new[i] = (x[i] * be.sqrt())
-                    .clamp(x[i] - cfg.move_limit, x[i] + cfg.move_limit)
+                    .clamp(x[i] - ml, x[i] + ml)
                     .clamp(RHO_MIN, 1.0);
             }
             let v = vol(&filter.apply(&x_new));
@@ -422,10 +452,30 @@ pub fn optimize_two_material(
                 break;
             }
         }
+        if cfg.damping_start.is_some_and(|d| it >= d) {
+            for &i in &design {
+                x_new[i] = 0.5 * (x_new[i] + x[i]);
+            }
+        }
         let change = design.iter().map(|&i| (x_new[i] - x[i]).abs()).fold(0.0, f64::max);
-        history.push(MmIter { iteration: it + 1, penalty: p, compliance: c, change });
+        let mean_change = if design.is_empty() { 0.0 } else { design.iter().map(|&i| (x_new[i] - x[i]).abs()).sum::<f64>() / design.len() as f64 };
+        let two_cycle = design.iter().map(|&i| (x_new[i] - x_prev2[i]).abs()).fold(0.0, f64::max);
+        let moving: Vec<usize> = design.iter().copied().filter(|&i| (x_new[i] - x[i]).abs() > 0.05).collect();
+        let n_moving_gray = moving.iter().filter(|&&i| rho_t[i] > 0.1 && rho_t[i] < 0.9).count();
+        history.push(MmIter {
+            iteration: it + 1,
+            penalty: p,
+            compliance: c,
+            change,
+            mean_change,
+            two_cycle,
+            n_moving: moving.len(),
+            n_moving_gray,
+        });
+        x_prev2 = x;
         x = x_new;
-        if it >= final_phase_start && change < cfg.tol_change {
+        let measure = if cfg.converge_on_mean { mean_change } else { change };
+        if it >= final_phase_start && measure < cfg.tol_change {
             converged = true;
             break;
         }
@@ -437,6 +487,11 @@ pub fn optimize_two_material(
         0.0
     } else {
         design.iter().filter(|&&i| rho[i] > 0.1 && rho[i] < 0.9).count() as f64 / design.len() as f64
+    };
+    let gray_design = if design.is_empty() {
+        0.0
+    } else {
+        design.iter().filter(|&&i| x[i] > 0.1 && x[i] < 0.9).count() as f64 / design.len() as f64
     };
     let mut map = start.clone();
     for &i in &solid {
@@ -477,6 +532,7 @@ pub fn optimize_two_material(
         compliance_continuous: compliance,
         compliance_binary: verify.compliance,
         gray_fraction: gray,
+        gray_fraction_design: gray_design,
         frozen_cells: frozen.iter().filter(|&&b| b).count(),
     })
 }

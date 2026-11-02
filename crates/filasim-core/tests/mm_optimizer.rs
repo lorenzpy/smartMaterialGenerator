@@ -337,3 +337,96 @@ fn schedule_sensitivity() {
         );
     }
 }
+
+/// Where does the missing convergence come from? Prints the iteration trace
+/// of the default run and compares remedies. Slow; run with `--ignored`.
+#[test]
+#[ignore]
+fn convergence_diagnosis() {
+    let s = setup(48, 8, 8, 60.0);
+    let g = &s.grid;
+    let start = MaterialMap::uniform(g, s.table.clone(), 0, 0);
+    let frozen = frozen_ends(&s);
+    let mk = |max_iter: usize| {
+        let mut cfg = MmConfig::new(0, 1);
+        cfg.max_stiff_volume_fraction = Some(0.5);
+        cfg.frozen_stiff = frozen.clone();
+        cfg.max_iter = max_iter;
+        cfg
+    };
+
+    let r = optimize_two_material(g, s.levels, &s.problem, &start, &mk(150), base()).unwrap();
+    println!("\nDEFAULT run (150 it, penalty ramps 1->3 in steps of 0.5 every 12 it; final phase from it 72)");
+    println!("{:>4} {:>4} {:>10} {:>8} {:>8} {:>9} {:>7} {:>9}", "it", "p", "compliance", "max|dx|", "mean|dx|", "2-cycle", "moving", "mv in gray");
+    for h in r.history.iter().filter(|h| h.iteration % 6 == 0 || h.iteration <= 3) {
+        println!(
+            "{:4} {:4.1} {:10.3} {:8.4} {:8.5} {:9.4} {:7} {:9}",
+            h.iteration, h.penalty, h.compliance, h.change, h.mean_change, h.two_cycle, h.n_moving, h.n_moving_gray
+        );
+    }
+    let tail: Vec<_> = r.history.iter().skip(100).collect();
+    let n = tail.len() as f64;
+    println!(
+        "last 50 it: mean max|dx| {:.4}, mean mean|dx| {:.5}, mean 2-cycle {:.4}, mean moving {:.1} cells (of which gray {:.1})",
+        tail.iter().map(|h| h.change).sum::<f64>() / n,
+        tail.iter().map(|h| h.mean_change).sum::<f64>() / n,
+        tail.iter().map(|h| h.two_cycle).sum::<f64>() / n,
+        tail.iter().map(|h| h.n_moving as f64).sum::<f64>() / n,
+        tail.iter().map(|h| h.n_moving_gray as f64).sum::<f64>() / n
+    );
+    let c_tail: Vec<f64> = r.history.iter().skip(100).map(|h| h.compliance).collect();
+    let (cmin, cmax) = (c_tail.iter().cloned().fold(f64::INFINITY, f64::min), c_tail.iter().cloned().fold(0.0, f64::max));
+    println!("compliance over its 101-150: min {cmin:.3} max {cmax:.3} (spread {:.2}%)", 100.0 * (cmax - cmin) / cmin);
+
+    println!("\nREMEDIES (filter radius 1.5, tol 0.01 on the stated measure)");
+    println!("{:34} {:>6} {:>5} {:>6} {:>5} {:>9}", "variant", "iters", "conv", "gray%", "", "C_binary");
+    let variants: Vec<(&str, Box<dyn Fn(&mut MmConfig)>)> = vec![
+        ("original (max|dx|)", Box::new(|_c| {})),
+        ("mean|dx| criterion", Box::new(|c| c.converge_on_mean = true)),
+        ("damping from it 12", Box::new(|c| c.damping_start = Some(12))),
+        ("move-limit decay", Box::new(|c| c.move_limit_decay = true)),
+        ("damping + decay", Box::new(|c| { c.damping_start = Some(12); c.move_limit_decay = true; })),
+        ("damping + decay + mean criterion", Box::new(|c| { c.damping_start = Some(12); c.move_limit_decay = true; c.converge_on_mean = true; })),
+    ];
+    for (name, f) in &variants {
+        let mut cfg = mk(300);
+        f(&mut cfg);
+        let r = optimize_two_material(g, s.levels, &s.problem, &start, &cfg, base()).unwrap();
+        let last = r.history.last().unwrap();
+        println!(
+            "{name:34} {:6} {:>5} {:6.1} {:>5} {:9.3}   (last: max {:.4} mean {:.5} 2cyc {:.4})",
+            r.iterations, r.converged, 100.0 * r.gray_fraction, "", r.compliance_binary, last.change, last.mean_change, last.two_cycle
+        );
+    }
+}
+
+/// Is the gray a filter effect, and which tolerance suits the mean criterion?
+#[test]
+#[ignore]
+fn gray_and_tolerance_check() {
+    let s = setup(48, 8, 8, 60.0);
+    let g = &s.grid;
+    let start = MaterialMap::uniform(g, s.table.clone(), 0, 0);
+    let frozen = frozen_ends(&s);
+    println!("\n{:30} {:>6} {:>5} {:>9} {:>9} {:>9}", "variant", "iters", "conv", "gray rho~", "gray x", "C_binary");
+    let runs: Vec<(&str, f64, bool, f64)> = vec![
+        ("r=1.5 max<0.01", 1.5, false, 0.01),
+        ("r=1.5 mean<1e-3", 1.5, true, 1e-3),
+        ("r=1.5 mean<2e-4", 1.5, true, 2e-4),
+        ("r=1.0 max<0.01", 1.0, false, 0.01),
+    ];
+    for (name, radius, mean, tol) in runs {
+        let mut cfg = MmConfig::new(0, 1);
+        cfg.max_stiff_volume_fraction = Some(0.5);
+        cfg.frozen_stiff = frozen.clone();
+        cfg.max_iter = 300;
+        cfg.filter_radius_cells = radius;
+        cfg.converge_on_mean = mean;
+        cfg.tol_change = tol;
+        let r = optimize_two_material(g, s.levels, &s.problem, &start, &cfg, base()).unwrap();
+        println!(
+            "{name:30} {:6} {:>5} {:8.1}% {:8.1}% {:9.3}",
+            r.iterations, r.converged, 100.0 * r.gray_fraction, 100.0 * r.gray_fraction_design, r.compliance_binary
+        );
+    }
+}
