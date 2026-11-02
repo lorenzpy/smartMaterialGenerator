@@ -12,8 +12,10 @@
 //!
 //! Scope of M1 (deliberately small):
 //! - stiffness ratio per cell, mass and volume share per material;
-//! - each material's Poisson ratio is stored but NOT yet used by the solver
-//!   (one reference `nu` for all cells — milestone M1b);
+//! - M1b: up to TWO distinct Poisson ratios per part, realized through the
+//!   solver's existing second-tensor ("TI overlay") path with an ISOTROPIC
+//!   tensor (`ti::isotropic_ratios`) — see [`MaterialMap::solver_inputs`].
+//!   More than two ratios needs an N-tensor generalization of `mg.rs`;
 //! - no strength, interface or cost data yet.
 //!
 //! The map lives NEXT TO [`VoxelGrid`] rather than inside it, so none of the
@@ -21,7 +23,9 @@
 //! be built on the PADDED grid the solver actually uses (see
 //! [`crate::solve::pad_for_levels`]).
 
-use crate::eps::EMIN_REL;
+use crate::eps::{EpsField, EMIN_REL};
+use crate::solve::SolveSettings;
+use crate::ti::isotropic_ratios;
 use crate::voxel::VoxelGrid;
 
 /// Constants of one material. Units: MPa, g/cm³.
@@ -30,7 +34,7 @@ pub struct MaterialProps {
     pub name: String,
     /// Young's modulus (MPa).
     pub e: f64,
-    /// Poisson ratio (stored; not yet used per cell by the solver).
+    /// Poisson ratio (used per cell via [`MaterialMap::solver_inputs`]).
     pub nu: f64,
     /// Density (g/cm³), used for mass and mass fractions.
     pub density: f64,
@@ -78,6 +82,9 @@ pub enum MaterialError {
     LengthMismatch { cells: usize, ids: usize },
     UnknownId(u8),
     NonPositiveModulus(usize),
+    /// More distinct Poisson ratios among the used materials than the solver
+    /// can represent (reference class + one overlay class). Holds the count.
+    TooManyPoissonRatios(usize),
 }
 
 impl MaterialMap {
@@ -219,5 +226,73 @@ impl MaterialMap {
         } else {
             vec![0.0; v.len()]
         }
+    }
+}
+
+impl MaterialMap {
+    /// Everything the solver needs for this map: the per-cell stiffness field
+    /// and the matching [`SolveSettings`] (`e0`, `nu` of the reference
+    /// material; `ti` set when a second Poisson ratio is present).
+    ///
+    /// - All used materials share the reference `nu` → plain single-tensor
+    ///   path (`ti = None`), identical to [`MaterialMap::eps`].
+    /// - Exactly one other `nu` → cells of that class go into the overlay
+    ///   field with an isotropic tensor of that `nu`; the rest stay in the
+    ///   primary field. Weights are `occupancy × E_mat / E_ref` in both.
+    /// - Otherwise → [`MaterialError::TooManyPoissonRatios`].
+    ///
+    /// `base` supplies tolerance / iteration limits; `e0`, `nu`, `ti` are
+    /// overwritten.
+    pub fn solver_inputs(
+        &self,
+        grid: &VoxelGrid,
+        base: SolveSettings,
+    ) -> Result<(EpsField, SolveSettings), MaterialError> {
+        self.validate(grid)?;
+        const NU_TOL: f64 = 1e-9;
+        let nu_ref = self.table[self.reference].nu;
+        let e_ref = self.e_ref();
+
+        let mut used = vec![false; self.table.len()];
+        for (i, &sc) in grid.scale.iter().enumerate() {
+            if sc > 0.0 {
+                used[self.id[i] as usize] = true;
+            }
+        }
+        // Distinct Poisson ratios among used materials, other than the reference's.
+        let mut others: Vec<f64> = Vec::new();
+        for (m, &u) in self.table.iter().zip(&used) {
+            if u && (m.nu - nu_ref).abs() > NU_TOL && !others.iter().any(|&v| (v - m.nu).abs() <= NU_TOL) {
+                others.push(m.nu);
+            }
+        }
+        if others.len() > 1 {
+            return Err(MaterialError::TooManyPoissonRatios(others.len() + 1));
+        }
+        let mut settings = base;
+        settings.e0 = e_ref;
+        settings.nu = nu_ref;
+        let Some(&nu_b) = others.first() else {
+            settings.ti = None;
+            return Ok((EpsField::from(self.eps(grid)), settings));
+        };
+
+        let ratio: Vec<f64> = self.table.iter().map(|m| m.e / e_ref).collect();
+        let in_b: Vec<bool> = self.table.iter().map(|m| (m.nu - nu_b).abs() <= NU_TOL).collect();
+        let n = grid.cell_count();
+        let (mut solid, mut infill) = (vec![0f32; n], vec![0f32; n]);
+        for (i, &sc) in grid.scale.iter().enumerate() {
+            if sc > 0.0 {
+                let m = self.id[i] as usize;
+                let w = ((EMIN_REL + (1.0 - EMIN_REL) * sc) as f64 * ratio[m]) as f32;
+                if in_b[m] {
+                    infill[i] = w;
+                } else {
+                    solid[i] = w;
+                }
+            }
+        }
+        settings.ti = Some(isotropic_ratios(nu_b));
+        Ok((EpsField::ti(solid, infill), settings))
     }
 }
