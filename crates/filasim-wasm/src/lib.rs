@@ -577,6 +577,9 @@ fn map_displacements(mesh: &TriMesh, sol: &Solution) -> Vec<f32> {
 
 #[wasm_bindgen]
 pub struct Model {
+    /// Multi-material fork: result of the last `mm_run` (region meshes per
+    /// material, ready for the viewport).
+    mm_regions: Vec<(u8, RegionMesh)>,
     /// Working mesh: display + segmentation + BC attachment + voxelization.
     /// Subdivided at load so deformed shapes can actually bend (a coarse STL
     /// face has no vertices to carry the curve).
@@ -955,6 +958,7 @@ impl Model {
         };
         let bodies = body_count(&mesh_orig);
         Model {
+            mm_regions: Vec::new(),
             mesh,
             mesh_orig,
             parents,
@@ -5381,4 +5385,222 @@ pub extern "C" fn bench_solve(nx: u32, ny: u32, nz: u32, h: f64) -> f64 {
     let kappa = 10.0 * (1.0 + nu) / (12.0 + 11.0 * nu);
     let exact = f * l.powi(3) / (3.0 * e0 * inertia) + f * l / (kappa * g * area);
     tip[2] / exact
+}
+
+// ======================= multi-material fork (mm_*) ==========================
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MmMaterialOpt {
+    name: String,
+    e: f64,
+    nu: f64,
+    density: f64,
+    #[serde(default)]
+    stress_allow: Option<f64>,
+    #[serde(default)]
+    strain_allow: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MmOpts {
+    materials: Vec<MmMaterialOpt>,
+    /// Objective weights (normalized by their values at the first iterate).
+    #[serde(default = "mm_one")]
+    w_compliance: f64,
+    #[serde(default = "mm_one")]
+    w_risk: f64,
+    #[serde(default = "mm_q")]
+    risk_exponent: f64,
+    /// Upper bound on each material's volume fraction (`null` = unbounded).
+    #[serde(default)]
+    max_fraction: Vec<Option<f64>>,
+    /// Material that cells at supports/loads are fixed to (default 0).
+    #[serde(default)]
+    keep_material: usize,
+    #[serde(default = "mm_filter")]
+    filter_radius: f64,
+    #[serde(default = "mm_iters")]
+    max_iter: usize,
+    /// Also start from every single material and keep the best design.
+    #[serde(default)]
+    multi_start: bool,
+}
+fn mm_one() -> f64 {
+    1.0
+}
+fn mm_q() -> f64 {
+    8.0
+}
+fn mm_filter() -> f64 {
+    1.5
+}
+fn mm_iters() -> usize {
+    200
+}
+
+#[wasm_bindgen]
+impl Model {
+    /// Run the general multi-material optimizer on the current setup
+    /// (supports + loads from the normal boundary conditions). Returns JSON
+    /// with the metrics of the optimized design and of every single-material
+    /// baseline; region meshes are fetched with `mm_region_*`.
+    /// `progress` is called as `progress(jsonString)` once per iteration.
+    pub fn mm_run(&mut self, opts_json: &str, progress: &js_sys::Function) -> Result<String, JsValue> {
+        use filasim_core::materials::{MaterialMap, MaterialProps};
+        use filasim_core::mmgen::{optimize_best_of, Budget, MgConfig};
+
+        self.ensure_grid()?;
+        let opts: MmOpts = serde_json::from_str(opts_json).map_err(err)?;
+        if opts.materials.len() < 2 {
+            return Err(err("need at least two materials"));
+        }
+        let (grid, levels) = {
+            let (g, l) = self.grid.as_ref().unwrap();
+            (g.clone(), *l)
+        };
+        let asm = assemble(&self.mesh, &grid, &self.bcs, None, &self.settings).map_err(err)?;
+        let report = check_problem(&grid, &asm);
+        if !report.ok {
+            return Err(err("model is under-constrained — fix the setup first (run Check)"));
+        }
+        let table: Vec<MaterialProps> = opts
+            .materials
+            .iter()
+            .map(|m| {
+                MaterialProps::new(&m.name, m.e, m.nu, m.density)
+                    .with_limits(m.stress_allow.unwrap_or(f64::INFINITY), m.strain_allow.unwrap_or(f64::INFINITY))
+            })
+            .collect();
+        let nm = table.len();
+        let keep = opts.keep_material.min(nm - 1);
+        // Reference material = the first one (its E scales the weights).
+        let start = MaterialMap::uniform(&grid, table, 0, 0);
+
+        // Cells touching a support/load node stay `keep` and are left out of
+        // the risk (stress singularities at constraints are not design
+        // information); the risk mask is dilated by one cell.
+        let n = grid.cell_count();
+        let (mx, my) = (grid.nx + 1, grid.ny + 1);
+        let mut fixed = vec![-1i16; n];
+        let mut near_bc = vec![false; n];
+        for nodes in &asm.bc_nodes {
+            for &nd in nodes {
+                let nd = nd as usize;
+                let (x, y, z) = (nd % mx, (nd / mx) % my, nd / (mx * my));
+                for dz in 0..2usize {
+                    for dy in 0..2usize {
+                        for dx in 0..2usize {
+                            if x >= dx && y >= dy && z >= dz {
+                                let (cx, cy, cz) = (x - dx, y - dy, z - dz);
+                                if cx < grid.nx && cy < grid.ny && cz < grid.nz {
+                                    let ci = (cz * grid.ny + cy) * grid.nx + cx;
+                                    if grid.scale[ci] > 0.0 {
+                                        fixed[ci] = keep as i16;
+                                        near_bc[ci] = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut excluded = near_bc.clone();
+        for cz in 0..grid.nz {
+            for cy in 0..grid.ny {
+                for cx in 0..grid.nx {
+                    let ci = (cz * grid.ny + cy) * grid.nx + cx;
+                    if !near_bc[ci] {
+                        continue;
+                    }
+                    for (dx, dy, dz) in [(1i64, 0i64, 0i64), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+                        let (x, y, z) = (cx as i64 + dx, cy as i64 + dy, cz as i64 + dz);
+                        if x >= 0 && y >= 0 && z >= 0 && (x as usize) < grid.nx && (y as usize) < grid.ny && (z as usize) < grid.nz {
+                            excluded[(z as usize * grid.ny + y as usize) * grid.nx + x as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+        let risk_mask: Vec<bool> = (0..n).map(|i| grid.scale[i] > 0.0 && !excluded[i]).collect();
+
+        let total: f64 = (0..n).map(|i| grid.scale[i].max(0.0) as f64).sum();
+        let mut cfg = MgConfig::new();
+        cfg.w_compliance = opts.w_compliance;
+        cfg.w_risk = opts.w_risk;
+        cfg.risk_exponent = opts.risk_exponent.clamp(2.0, 20.0);
+        cfg.filter_radius_cells = opts.filter_radius.clamp(1.0, 4.0);
+        cfg.max_iter = opts.max_iter.clamp(5, 1000);
+        cfg.fixed_material = fixed;
+        cfg.risk_mask = risk_mask.clone();
+        for (m, mf) in opts.max_fraction.iter().enumerate().take(nm) {
+            if let Some(f) = mf {
+                let mut coeff = vec![0.0; nm];
+                coeff[m] = 1.0;
+                cfg.budgets.push(Budget { coeff, max: f.clamp(0.0, 1.0) * total });
+            }
+        }
+        let base = self.settings;
+
+        let mut cb = |it: &filasim_core::mmgen::MgIter| -> bool {
+            let v = serde_json::json!({
+                "iteration": it.iteration, "penalty": it.penalty, "objective": it.objective,
+                "compliance": it.compliance, "risk": it.risk, "meanChange": it.mean_change,
+            });
+            let _ = progress.call1(&JsValue::NULL, &JsValue::from_str(&v.to_string()));
+            true
+        };
+        let res = optimize_best_of(&grid, levels, &asm.problem, &start, &cfg, base, opts.multi_start, &mut cb)
+            .map_err(err)?;
+        let best = &res.best;
+
+        // Region meshes per material for the viewport (chosen design).
+        self.mm_regions.clear();
+        for m in 0..nm {
+            if best.metrics.volume_fractions[m] <= 0.0 {
+                continue;
+            }
+            let mut r = extract_region_smooth(&grid, &|ci| grid.scale[ci] > 0.0 && best.map.id[ci] as usize == m, 0.45);
+            r.density = m as f64;
+            if !r.indices.is_empty() {
+                self.mm_regions.push((m as u8, r));
+            }
+        }
+        let cand_json = |c: &filasim_core::mmgen::Candidate| {
+            serde_json::json!({
+                "label": c.label, "objective": c.objective, "feasible": c.feasible,
+                "compliance": c.metrics.compliance, "maxDisp": c.metrics.max_disp,
+                "riskMax": c.metrics.risk_max, "riskP": c.metrics.risk_pnorm,
+                "failing": c.metrics.failing_cells, "volumeFractions": c.metrics.volume_fractions,
+            })
+        };
+        let baselines: Vec<_> = res.candidates.iter().filter(|c| c.label.starts_with("all ")).map(cand_json).collect();
+        let mt = &best.metrics;
+        let out = serde_json::json!({
+            "iterations": res.primary.iterations, "converged": res.primary.converged,
+            "grayFraction": res.primary.gray_fraction,
+            "chosen": best.label, "candidates": res.candidates.iter().map(cand_json).collect::<Vec<_>>(),
+            "compliance": mt.compliance, "maxDisp": mt.max_disp, "riskMax": mt.risk_max, "riskP": mt.risk_pnorm,
+            "failing": mt.failing_cells, "volumeFractions": mt.volume_fractions, "massG": mt.mass_g,
+            "baselines": baselines,
+            "materials": opts.materials.iter().map(|m| m.name.clone()).collect::<Vec<_>>(),
+            "budgetUsage": res.primary.budget_usage,
+        });
+        Ok(out.to_string())
+    }
+
+    pub fn mm_region_count(&self) -> u32 {
+        self.mm_regions.len() as u32
+    }
+    pub fn mm_region_material(&self, i: u32) -> u32 {
+        self.mm_regions[i as usize].0 as u32
+    }
+    pub fn mm_region_positions(&self, i: u32) -> Vec<f32> {
+        self.mm_regions[i as usize].1.positions.clone()
+    }
+    pub fn mm_region_indices(&self, i: u32) -> Vec<u32> {
+        self.mm_regions[i as usize].1.indices.clone()
+    }
 }

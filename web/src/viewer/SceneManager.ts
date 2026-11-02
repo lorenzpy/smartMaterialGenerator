@@ -217,6 +217,8 @@ export class SceneManager {
   private viewH = 0;
 
   private regionMeshes: THREE.Mesh[] = [];
+  /** Multi-material fork: per-material surface meshes (replace the part). */
+  private mmMeshes: THREE.Mesh[] = [];
   private regionVisible: boolean[] = [];
   private viewMode: ViewMode = "setup";
 
@@ -2697,6 +2699,37 @@ export class SceneManager {
     }
   }
 
+  /** Multi-material fork: show one colored surface per material in place of
+   *  the part (null restores the normal view). */
+  setMultiMaterial(parts: { color: string; positions: Float32Array; indices: Uint32Array }[] | null) {
+    for (const m of this.mmMeshes) {
+      this.scene.remove(m);
+      m.geometry.dispose();
+      (m.material as THREE.Material).dispose();
+    }
+    this.mmMeshes = [];
+    if (parts) {
+      parts.forEach((r, i) => {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(r.positions, 3));
+        geo.setIndex(new THREE.BufferAttribute(r.indices, 1));
+        geo.computeVertexNormals();
+        const mat = new THREE.MeshStandardMaterial({
+          color: new THREE.Color(r.color),
+          roughness: 0.55,
+          metalness: 0.0,
+          side: THREE.DoubleSide,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = i;
+        this.scene.add(mesh);
+        this.mmMeshes.push(mesh);
+      });
+    }
+    this.refreshClipping();
+    this.refreshView();
+  }
+
   setRegions(regions: OptRegion[] | null) {
     for (const m of this.regionMeshes) {
       this.scene.remove(m);
@@ -3041,6 +3074,7 @@ export class SceneManager {
       apply((c as THREE.Mesh).material, planes);
     }
     for (const m of this.regionMeshes) apply(m.material, planes);
+    for (const m of this.mmMeshes) apply(m.material, planes);
     apply(this.optShapeMesh?.material ?? undefined, planes);
   }
 
@@ -3128,7 +3162,8 @@ export class SceneManager {
     const hideHull = this.resultSolid && infill;
     // Bed-peel heatmap on screen: hide the part so the plate map reads cleanly
     // (no need to look under or through the model).
-    this.mesh.visible = !voxResult && !hideHull && !this.results.peelMap;
+    this.mesh.visible = !voxResult && !hideHull && !this.results.peelMap && this.mmMeshes.length === 0;
+    for (const m of this.mmMeshes) m.visible = true;
     this.results.voxelGroup.visible = this.viewMode === "mesh";
     if (this.results.voxRes) this.results.voxRes.group.visible = voxResult;
     // Wireframe overlay: undeformed model views only (its lines are built from

@@ -3,6 +3,7 @@
 
 // Promise wrapper around the engine worker.
 
+import type { MmOptions, MmOutput, MmProgress } from "../mm/types";
 import type { Bc, CheckReport, CylFit, SolveStats, VoxelInfo } from "../types";
 import { EngineError } from "./EngineProtocol";
 import type {
@@ -408,6 +409,15 @@ export class EngineClient {
     ) => void
   ): Promise<OptimizeOutput> {
     return this.call({ op: "optimize", opts }, [], onProgress as Pending["onProgress"]);
+  }
+
+  /** Multi-material fork: run the general N-material optimizer. */
+  mmRun(opts: MmOptions, onProgress?: (p: MmProgress) => void): Promise<MmOutput> {
+    return this.call(
+      { op: "mmRun", opts },
+      [],
+      onProgress ? ((data: unknown) => onProgress(data as MmProgress)) as Pending["onProgress"] : undefined
+    );
   }
 
   /** Exposed-face hull + cell edges of the analysis voxel grid. */

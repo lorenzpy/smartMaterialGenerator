@@ -101,6 +101,7 @@ export function Viewer() {
     sceneEvents.onDisplacements = (d, stats) => scene.setDisplacements(d, stats);
     sceneEvents.onVertexDensity = (d) => scene.setVertexDensity(d);
     sceneEvents.onRegions = (r) => scene.setRegions(r);
+    sceneEvents.onMultiMaterial = (parts) => scene.setMultiMaterial(parts);
     sceneEvents.onViewState = (mode, scale) => scene.setViewState(mode, scale);
     sceneEvents.onVoxelMesh = (hull, edges, density) => scene.setVoxelMesh(hull, edges, density);
     sceneEvents.onBuildGhost = (p) => scene.setBuildGhost(p);

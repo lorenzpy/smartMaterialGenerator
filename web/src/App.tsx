@@ -19,6 +19,7 @@ import { Disclaimer } from "./ui/Disclaimer";
 import { SupportBanner } from "./ui/SupportBanner";
 import { SupportModal } from "./ui/SupportModal";
 import { NerdLog } from "./ui/NerdLog";
+import { MultiMaterialPanel } from "./mm/MultiMaterialPanel";
 import { TitleTipLayer } from "./ui/HelpTip";
 import { Viewer } from "./viewer/Viewer";
 import { useStore } from "./store";
@@ -91,6 +92,7 @@ export function App() {
           <ViewportChips />
           {!model && <DropZone />}
           <NerdLog />
+          <MultiMaterialPanel />
           {busy && (
             <div className="busychip">
               <div className="spinner" />

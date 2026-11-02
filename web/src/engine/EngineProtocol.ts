@@ -12,6 +12,7 @@
 //! (the `never` default catches a forgotten one), and one one-line method on
 //! EngineClient.
 
+import type { MmOptions, MmOutput } from "../mm/types";
 import type { CheckReport, CylFit, LoadedModel, SolveStats, VoxelInfo } from "../types";
 import type {
   BuildSimOptions,
@@ -112,6 +113,8 @@ export interface EngineRequests {
   setBuildState: { state: "released" | "bonded" };
   /** OptimizeOptions object — serialized to JSON for the wasm API. */
   optimize: { opts: OptimizeOptions };
+  /** Multi-material fork: general N-material optimization. */
+  mmRun: { opts: MmOptions };
   densityShape: { threshold: number };
   resmooth: { iters: number };
   setIsoThreshold: { threshold: number; smoothIters: number };
@@ -247,6 +250,7 @@ export interface EngineResponses {
   modalAnalysis: { result: ModalAnalysisResult; displacements: Float32Array };
   setBuildState: SolveResult<{ maxDisplacement: number }>;
   optimize: OptimizeOutput;
+  mmRun: MmOutput;
   densityShape: { positions: Float32Array; indices: Uint32Array; density: Float32Array };
   resmooth: { regions: OptRegion[] };
   setIsoThreshold: { regions: OptRegion[] };

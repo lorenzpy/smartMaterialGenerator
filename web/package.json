@@ -13,7 +13,9 @@
     "check:units": "node scripts/check-units.mjs",
     "check:step": "node scripts/check-step-selection.mjs",
     "sample:mesh": "node scripts/build-sample-mesh.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "dev:st": "vite --config vite.st.config.ts",
+    "e2e:mm": "node scripts/e2e-mm.mjs"
   },
   "dependencies": {
     "meshstep": "0.1.1",

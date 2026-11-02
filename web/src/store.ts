@@ -1902,6 +1902,8 @@ export interface SceneEvents {
   onDisplacements?: (disp: Float32Array | null, stats: { maxDisplacement: number } | null) => void;
   onVertexDensity?: (density: Float32Array | null) => void;
   onRegions?: (regions: OptRegion[] | null) => void;
+  /** Multi-material fork: per-material surface meshes (null clears). */
+  onMultiMaterial?: (parts: { color: string; positions: Float32Array; indices: Uint32Array }[] | null) => void;
   /** Result is a Part Topo body (solid): hide the original envelope hull in the
    *  result views and render the body opaque. */
   onResultSolid?: (solid: boolean) => void;

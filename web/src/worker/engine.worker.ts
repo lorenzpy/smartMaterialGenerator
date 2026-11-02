@@ -471,6 +471,27 @@ self.onmessage = async (ev: MessageEvent<EngineWorkerRequest>) => {
         reply(msg, values, [values.buffer]);
         return;
       }
+      case "mmRun": {
+        if (cancelArr) Atomics.store(cancelArr, 0, 0); // arm fresh
+        const m = requireModel();
+        const t0 = performance.now();
+        const summary = JSON.parse(
+          m.mm_run(JSON.stringify(msg.opts), (json: string) => {
+            (self as unknown as Worker).postMessage({ id: msg.id, progress: true, data: JSON.parse(json) });
+          })
+        );
+        summary.seconds = (performance.now() - t0) / 1000;
+        const regions: { material: number; positions: Float32Array; indices: Uint32Array }[] = [];
+        const transfer: Transferable[] = [];
+        for (let i = 0; i < m.mm_region_count(); i++) {
+          const positions = m.mm_region_positions(i);
+          const indices = m.mm_region_indices(i);
+          regions.push({ material: m.mm_region_material(i), positions, indices });
+          transfer.push(positions.buffer, indices.buffer);
+        }
+        reply(msg, { summary, regions }, transfer);
+        break;
+      }
       case "optimize": {
         if (cancelArr) Atomics.store(cancelArr, 0, 0); // arm fresh
         const m = requireModel();
