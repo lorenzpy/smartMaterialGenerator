@@ -23,6 +23,7 @@ pub mod freq;
 pub mod mesh;
 pub mod materials;
 pub mod mg;
+pub mod mmgen;
 pub mod mmopt;
 pub mod modal;
 pub mod orient;

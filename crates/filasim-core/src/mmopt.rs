@@ -172,12 +172,12 @@ impl<'a> MmContext<'a> {
 }
 
 /// Cone density filter over solid cells (row-normalized).
-struct Filter {
+pub(crate) struct Filter {
     rows: Vec<Vec<(u32, f32)>>,
 }
 
 impl Filter {
-    fn build(grid: &VoxelGrid, radius: f64) -> Self {
+    pub(crate) fn build(grid: &VoxelGrid, radius: f64) -> Self {
         let n = grid.cell_count();
         let mut rows = vec![Vec::new(); n];
         let rc = radius.ceil() as i64;
@@ -209,13 +209,13 @@ impl Filter {
         }
         Self { rows }
     }
-    fn apply(&self, x: &[f64]) -> Vec<f64> {
+    pub(crate) fn apply(&self, x: &[f64]) -> Vec<f64> {
         self.rows
             .iter()
             .map(|r| r.iter().map(|&(j, a)| a as f64 * x[j as usize]).sum())
             .collect()
     }
-    fn apply_t(&self, g: &[f64]) -> Vec<f64> {
+    pub(crate) fn apply_t(&self, g: &[f64]) -> Vec<f64> {
         let mut out = vec![0f64; g.len()];
         for (i, r) in self.rows.iter().enumerate() {
             for &(j, a) in r {
@@ -251,8 +251,9 @@ pub struct MmConfig {
     /// exceeds this value (MPa) are fixed stiff (the soft material would not
     /// carry that stress within its strain limit).
     pub keep_stiff_above_stress: Option<f64>,
-    /// Stop on the MEAN design change instead of the max (default false =
-    /// max, the original behavior).
+    /// Stop on the MEAN design change (default) instead of the max. The max
+    /// is dominated by a few slowly drifting cells and over-states the lack
+    /// of convergence (see notes, section 13).
     pub converge_on_mean: bool,
     /// Average consecutive designs `x ← ½(x_new + x)` from this iteration on
     /// (kills OC 2-cycles). `None` = off (original).
@@ -274,12 +275,16 @@ impl MmConfig {
             penalty_end: 3.0,
             penalty_step: 0.5,
             iters_per_penalty: 12,
-            max_iter: 150,
+            max_iter: 300,
             move_limit: 0.2,
-            tol_change: 0.01,
+            // Tolerance on the MEAN design change (see `converge_on_mean`).
+            // Measured on the cantilever case: 2e-4 stops after ~93
+            // iterations at the same quality the max-norm criterion needs
+            // ~257 for; 0.01 on the mean stops far too early.
+            tol_change: 2e-4,
             frozen_stiff: Vec::new(),
             keep_stiff_above_stress: None,
-            converge_on_mean: false,
+            converge_on_mean: true,
             damping_start: None,
             move_limit_decay: false,
         }

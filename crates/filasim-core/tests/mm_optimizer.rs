@@ -196,6 +196,8 @@ fn cantilever_optimizer_vs_rule_random_and_pla() {
     assert!((res.compliance_binary - c_opt).abs() / c_opt < 1e-4);
     println!("optimizer / rule = {:.3}   optimizer / random = {:.3}   optimizer / PLA = {:.3}", c_opt / c_rule, c_opt / c_rnd, c_opt / all_pla.0);
 
+    // With the default (mean-change) criterion the run now converges.
+    assert!(res.converged, "default configuration should converge within max_iter");
     // Budget honored exactly (to one cell).
     assert!(res.stiff_volume_fraction <= 0.5 + 1e-9);
     assert!(res.stiff_volume_fraction > 0.5 - 2.0 / solid.len() as f64);
@@ -327,6 +329,8 @@ fn schedule_sensitivity() {
         cfg.max_stiff_volume_fraction = Some(0.5);
         cfg.frozen_stiff = frozen.clone();
         cfg.max_iter = max_iter;
+        cfg.converge_on_mean = false;
+        cfg.tol_change = 0.01;
         cfg.penalty_end = p_end;
         cfg.iters_per_penalty = ips;
         cfg.filter_radius_cells = radius;
@@ -352,6 +356,9 @@ fn convergence_diagnosis() {
         cfg.max_stiff_volume_fraction = Some(0.5);
         cfg.frozen_stiff = frozen.clone();
         cfg.max_iter = max_iter;
+        // The diagnosis reproduces the ORIGINAL criterion (max |dx| < 0.01).
+        cfg.converge_on_mean = false;
+        cfg.tol_change = 0.01;
         cfg
     };
 
@@ -382,7 +389,7 @@ fn convergence_diagnosis() {
     println!("{:34} {:>6} {:>5} {:>6} {:>5} {:>9}", "variant", "iters", "conv", "gray%", "", "C_binary");
     let variants: Vec<(&str, Box<dyn Fn(&mut MmConfig)>)> = vec![
         ("original (max|dx|)", Box::new(|_c| {})),
-        ("mean|dx| criterion", Box::new(|c| c.converge_on_mean = true)),
+        ("mean|dx| criterion (tol 0.01)", Box::new(|c| c.converge_on_mean = true)),
         ("damping from it 12", Box::new(|c| c.damping_start = Some(12))),
         ("move-limit decay", Box::new(|c| c.move_limit_decay = true)),
         ("damping + decay", Box::new(|c| { c.damping_start = Some(12); c.move_limit_decay = true; })),

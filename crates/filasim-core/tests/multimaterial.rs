@@ -217,7 +217,9 @@ fn overlay_path_equals_direct_isotropic_solve() {
     let map = MaterialMap::uniform(&g, table.clone(), 0, 1);
     let base = SolveSettings { tol: 1e-9, max_iter: 4000, ..Default::default() };
     let (field, settings) = map.solver_inputs(&g, base).unwrap();
-    assert!(settings.ti.is_some() && field.infill.is_some());
+    // Only TPU is used, so a single tensor (at TPU's nu) suffices.
+    assert!(settings.ti.is_none() && field.infill.is_none());
+    assert!((settings.nu - 0.45).abs() < 1e-12);
     let (a, _) = solve_with_eps_cached(&mut None, &g, levels, &problem, &settings, field).unwrap();
 
     let direct = SolveSettings { e0: table[1].e, nu: table[1].nu, ti: None, ..base };
@@ -299,21 +301,6 @@ fn laminate_in_uniaxial_strain_depends_on_poisson_ratio() {
 }
 
 #[test]
-fn three_poisson_ratios_are_rejected() {
-    let g = VoxelGrid::solid_box(4, 4, 4, 1.0);
-    let table = vec![
-        MaterialProps::new("a", 1000.0, 0.30, 1.0),
-        MaterialProps::new("b", 1000.0, 0.35, 1.0),
-        MaterialProps::new("c", 1000.0, 0.45, 1.0),
-    ];
-    let mut map = MaterialMap::uniform(&g, table, 0, 0);
-    map.id[0] = 1;
-    map.id[1] = 2;
-    let r = map.solver_inputs(&g, SolveSettings::default());
-    assert!(matches!(r, Err(MaterialError::TooManyPoissonRatios(3))));
-}
-
-#[test]
 fn single_poisson_ratio_uses_plain_path() {
     let g = VoxelGrid::solid_box(4, 4, 4, 1.0);
     let table = vec![MaterialProps::test_pla(), MaterialProps::new("same nu", 2000.0, 0.35, 1.1)];
@@ -321,4 +308,118 @@ fn single_poisson_ratio_uses_plain_path() {
     map.id[3] = 1;
     let (field, s) = map.solver_inputs(&g, SolveSettings::default()).unwrap();
     assert!(s.ti.is_none() && field.infill.is_none());
+}
+
+// ============================== N materials, any Poisson ratio ==============
+
+use filasim_core::materials::{lame, LameBasis};
+
+#[test]
+fn lame_basis_reproduces_every_isotropic_material_in_range() {
+    let b = LameBasis::new(3500.0, 0.30, 0.47);
+    let mut st = 99u64;
+    for _ in 0..200 {
+        let e = 10.0 + 4000.0 * lcg(&mut st);
+        let nu = 0.30 + 0.17 * lcg(&mut st);
+        let (l, m) = lame(e, nu);
+        let (wa, wb) = b.weights(l, m);
+        let (la, ma) = lame(3500.0, 0.30);
+        let (lb, mb) = lame(3500.0, 0.47);
+        assert!(wa >= 0.0 && wb >= 0.0);
+        assert!((wa * la + wb * lb - l).abs() < 1e-9 * l.max(1.0));
+        assert!((wa * ma + wb * mb - m).abs() < 1e-9 * m.max(1.0));
+    }
+}
+
+#[test]
+fn three_materials_three_poisson_ratios_laminate_matches_analytic() {
+    // PLA (nu .35), ASA (nu .37) and TPU (nu .45), stacked along y in
+    // uniaxial strain: each layer acts with its constrained modulus.
+    let (nx, ny, nz) = (6usize, 18usize, 6usize);
+    let (g, levels) = padded_box(nx, ny, nz);
+    let (mx, my) = (g.nx + 1, g.ny + 1);
+    let node = |x: usize, y: usize, z: usize| ((z * my + y) * mx + x) as u32;
+    let wt = |i: usize, n: usize| if i == 0 || i == n { 0.5 } else { 1.0 };
+    let wsum = (nx * nz) as f64;
+    let (mut fixed, mut springs, mut forces) = (Vec::new(), Vec::new(), Vec::new());
+    for z in 0..=nz {
+        for y in 0..=ny {
+            for x in 0..=nx {
+                let n = node(x, y, z);
+                springs.push((n, [1.0, 0.0, 0.0], 1e7));
+                springs.push((n, [0.0, 0.0, 1.0], 1e7));
+                if y == 0 {
+                    fixed.push(n);
+                }
+                if y == ny {
+                    forces.push((n, [0.0, 100.0 * wt(x, nx) * wt(z, nz) / wsum, 0.0]));
+                }
+            }
+        }
+    }
+    let problem = NodeProblem { fixed, springs, forces, rigid: vec![], prescribed: vec![] };
+    let table = vec![MaterialProps::test_pla(), MaterialProps::test_asa(), MaterialProps::test_tpu()];
+    let mut map = MaterialMap::uniform(&g, table.clone(), 0, 0);
+    map.assign_halfspace(&g, [0.0, -1.0, 0.0], -(g.origin[1] + 6.0), 1); // y >= 6: ASA
+    map.assign_halfspace(&g, [0.0, -1.0, 0.0], -(g.origin[1] + 12.0), 2); // y >= 12: TPU
+    let base = SolveSettings { tol: 1e-9, max_iter: 8000, ..Default::default() };
+    let (field, settings) = map.solver_inputs(&g, base).unwrap();
+    assert!(settings.ti.is_some());
+    assert!((settings.nu - 0.35).abs() < 1e-12);
+    let (sol, _) = solve_with_eps_cached(&mut None, &g, levels, &problem, &settings, field).unwrap();
+    let mut uy = 0.0;
+    for z in 0..=nz {
+        for x in 0..=nx {
+            uy += wt(x, nx) * wt(z, nz) * sol.u[3 * node(x, ny, z) as usize + 1] as f64;
+        }
+    }
+    let uy = uy / wsum;
+    let m = |mp: &MaterialProps| mp.e * (1.0 - mp.nu) / ((1.0 + mp.nu) * (1.0 - 2.0 * mp.nu));
+    let area = (nx * nz) as f64;
+    let analytic = 100.0 / area * table.iter().map(|mp| 6.0 / m(mp)).sum::<f64>();
+    let dev = (uy - analytic) / analytic;
+    println!("3-material laminate: FE {uy:.6}  analytic {analytic:.6}  dev {:+.4}%", 100.0 * dev);
+    assert!(dev.abs() < 0.01);
+}
+
+#[test]
+fn voigt_mixture_of_two_materials_equals_equivalent_isotropic_solve() {
+    // Every cell: 50 % PLA + 50 % TPU as a Voigt mixture, expressed through
+    // the Lame basis. A Voigt mix of isotropic tensors is isotropic with
+    // lambda = mean, mu = mean, so it must equal a direct isotropic solve with
+    // the equivalent (E, nu).
+    let (nx, ny, nz) = (24usize, 6usize, 6usize);
+    let (g, levels) = padded_box(nx, ny, nz);
+    let problem = cantilever(&g, nx, ny, nz);
+    let (pla, tpu) = (MaterialProps::test_pla(), MaterialProps::test_tpu());
+    let (lp, mp) = lame(pla.e, pla.nu);
+    let (lt, mt) = lame(tpu.e, tpu.nu);
+    let (lm, mm) = (0.5 * (lp + lt), 0.5 * (mp + mt));
+    let basis = LameBasis::new(pla.e, pla.nu, tpu.nu);
+    let (wa, wb) = basis.weights(lm, mm);
+    let n = g.cell_count();
+    let (a, b): (Vec<f32>, Vec<f32>) = (0..n)
+        .map(|i| if g.scale[i] > 0.0 { (wa as f32, wb as f32) } else { (0.0, 0.0) })
+        .unzip();
+    let base = SolveSettings { tol: 1e-9, max_iter: 4000, ..Default::default() };
+    let settings = basis.settings(base);
+    let (s1, _) = solve_with_eps_cached(&mut None, &g, levels, &problem, &settings, EpsField::ti(a, b)).unwrap();
+
+    let e_eq = mm * (3.0 * lm + 2.0 * mm) / (lm + mm);
+    let nu_eq = lm / (2.0 * (lm + mm));
+    let direct = SolveSettings { e0: e_eq, nu: nu_eq, ti: None, ..base };
+    let (s2, _) = solve_with_eps_cached(&mut None, &g, levels, &problem, &direct, EpsField::from(grid_eps(&g))).unwrap();
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (x, y) in s1.u.iter().zip(&s2.u) {
+        num += ((*x - *y) as f64).powi(2);
+        den += (*y as f64).powi(2);
+    }
+    let rel = (num / den).sqrt();
+    println!("Voigt mixture via Lame basis vs equivalent isotropic: rel L2 {rel:.2e} (E_eq {e_eq:.1}, nu_eq {nu_eq:.3})");
+    assert!(rel < 1e-4);
+}
+
+fn lcg(state: &mut u64) -> f64 {
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    ((*state >> 33) as f64) / (1u64 << 31) as f64
 }
