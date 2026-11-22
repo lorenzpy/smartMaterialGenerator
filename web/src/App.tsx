@@ -63,13 +63,9 @@ export function App() {
   useEffect(() => {
     const onDrop = (ev: DragEvent) => {
       ev.preventDefault();
-      const f = ev.dataTransfer?.files?.[0];
-      if (!f) return;
-      void (async () => {
-        const s = useStore.getState();
-        if (/\.filasim$/i.test(f.name)) await s.openProject(f);
-        else await s.loadFile(f.name, await f.arrayBuffer());
-      })();
+      const files = Array.from(ev.dataTransfer?.files ?? []);
+      if (files.length === 0) return;
+      void useStore.getState().loadFiles(files);
     };
     const onDrag = (ev: DragEvent) => ev.preventDefault();
     window.addEventListener("drop", onDrop);
@@ -153,23 +149,26 @@ export function App() {
 
 /** Empty viewport = an invitation to act: drop target with an open button. */
 function DropZone() {
-  const loadFile = useStore((s) => s.loadFile);
+  const loadFiles = useStore((s) => s.loadFiles);
   const fileRef = useRef<HTMLInputElement>(null);
-  const onFile = async (f: File | undefined) => {
-    if (!f) return;
-    await loadFile(f.name, await f.arrayBuffer());
+  const onFile = async (files: File[]) => {
+    if (files.length > 0) await loadFiles(files);
   };
   return (
     <div className="dropzone">
       <div className="dz-card">
         <b>Drop an STL, 3MF, or STEP here</b>
-        <div className="small">STL units are set on import — the file never leaves your browser.</div>
+        <div className="small">
+          STL units are set on import — the file never leaves your browser. A Fusion simulation export (.sdz) dropped
+          together with its STEP file sets material, loads and supports automatically.
+        </div>
         <input
           ref={fileRef}
           type="file"
-          accept=".stl,.3mf,.step,.stp"
+          accept=".stl,.3mf,.step,.stp,.sdz"
+          multiple
           hidden
-          onChange={(e) => void onFile(e.target.files?.[0])}
+          onChange={(e) => void onFile(Array.from(e.target.files ?? []))}
         />
         <button className="primary" onClick={() => fileRef.current?.click()}>
           Open model…

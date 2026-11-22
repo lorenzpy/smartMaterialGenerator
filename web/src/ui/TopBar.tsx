@@ -21,6 +21,7 @@ export function TopBar() {
       saveProject: s.saveProject,
       openProject: s.openProject,
       loadFile: s.loadFile,
+      loadFiles: s.loadFiles,
     }))
   );
   const openRef = useRef<HTMLInputElement>(null);
@@ -41,11 +42,8 @@ export function TopBar() {
   }, [saveOpen]);
 
   // Load Project also accepts a plain STL/3MF and falls back to a normal import.
-  const onLoad = async (f: File | undefined) => {
-    if (f) {
-      if (/\.filasim$/i.test(f.name)) await s.openProject(f);
-      else await s.loadFile(f.name, await f.arrayBuffer());
-    }
+  const onLoad = async (files: File[]) => {
+    if (files.length > 0) await s.loadFiles(files);
     if (openRef.current) openRef.current.value = ""; // allow re-picking the same file
   };
 
@@ -74,9 +72,10 @@ export function TopBar() {
       <input
         ref={openRef}
         type="file"
-        accept=".filasim,.stl,.3mf,.step,.stp"
+        accept=".filasim,.stl,.3mf,.step,.stp,.sdz"
+        multiple
         hidden
-        onChange={(e) => void onLoad(e.target.files?.[0] ?? undefined)}
+        onChange={(e) => void onLoad(Array.from(e.target.files ?? []))}
       />
       <div className="saveproj" ref={saveRef}>
         <button

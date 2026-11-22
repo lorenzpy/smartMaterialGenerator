@@ -15,7 +15,9 @@
     "sample:mesh": "node scripts/build-sample-mesh.mjs",
     "preview": "vite preview",
     "dev:st": "vite --config vite.st.config.ts",
-    "e2e:mm": "node scripts/e2e-mm.mjs"
+    "e2e:mm": "node scripts/e2e-mm.mjs",
+    "check:sdz": "node --experimental-strip-types scripts/check-sdz.mjs",
+    "e2e:sdz": "node scripts/e2e-sdz.mjs"
   },
   "dependencies": {
     "meshstep": "0.1.1",

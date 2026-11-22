@@ -43,6 +43,7 @@ import {
 } from "./engine/stepSelection";
 import { buildBinaryStl, connectedBodies, isIdentityTransform } from "./engine/assembly";
 import { SAMPLE_BCS, SAMPLE_FILE, SAMPLE_MESH, SAMPLE_NOTICE, sampleUrl } from "./sampleModel";
+import { matchFaces, parseSdz, type SdzSetup } from "./engine/sdz/sdz";
 import { ENVELOPE_STEP, FieldServer, isEnvelope, resultIsSolidBody } from "./engine/FieldServer";
 import type {
   Bc,
@@ -974,6 +975,14 @@ interface AppState {
    *  (startup default). Silently a no-op when the assets are missing or a
    *  user model beat it to the viewport. */
   loadSampleModel(): Promise<void>;
+  /** Multi-material fork: Fusion simulation setup (.sdz) waiting for its
+   *  geometry. Applied automatically as soon as a STEP model is loaded. */
+  sdzPending: SdzSetup | null;
+  /** Open one or several dropped/selected files. A `.sdz` (Fusion simulation
+   *  export) together with a STEP file loads the model and applies the
+   *  study's material, loads and supports automatically; a `.sdz` alone is
+   *  held until the STEP arrives. Everything else behaves like `loadFile`. */
+  loadFiles(files: File[]): Promise<void>;
   /** Picker confirmed: bake the pending STL at `unitId`; `remember` = stop
    *  asking on future imports. */
   confirmImport(unitId: string, remember: boolean): void;
@@ -2103,6 +2112,151 @@ function inactiveBcIds(step: LoadStep | undefined): Set<string> {
 }
 
 /** Push the active step's BC glyphs to the viewport. */
+/** Multi-material fork: apply a Fusion simulation setup (.sdz) to the loaded
+ *  STEP model — material, supports, forces and moments — by finding the CAD
+ *  faces the study refers to on the STEP mesh. */
+async function applySdzSetup(set: SetState, get: () => AppState, strict = false) {
+  const setup = get().sdzPending;
+  if (!setup) return;
+  const st = get();
+  const waiting =
+    "Setup aus der .sdz gelesen. Zum Anwenden wird die zugehörige STEP-Datei desselben Körpers gebraucht (aus Fusion exportieren und hier laden, oder beide Dateien zusammen hineinziehen).";
+  if (!st.model || !st.stepInfo?.faces || st.isSample) {
+    set({ notice: waiting });
+    return;
+  }
+  const { matches, problems } = matchFaces(setup.faces, setup.faceCount, st.stepInfo.faces);
+  // `strict`: the model was already there before the .sdz came — only apply
+  // when it is evidently the same body (every referenced face found).
+  // Otherwise keep the setup waiting for the right geometry.
+  const wanted = new Set<number>();
+  for (const c of setup.constraints) c.faces.forEach((f) => wanted.add(f));
+  for (const l of setup.loads) l.faces.forEach((f) => wanted.add(f));
+  if (matches.size === 0 || (strict && matches.size < wanted.size)) {
+    set({
+      notice:
+        "Setup aus der .sdz gelesen, passt aber nicht zum geladenen Modell (die Flächen werden nicht gefunden). Bitte die STEP-Datei desselben Körpers aus Fusion laden.",
+    });
+    return;
+  }
+  const cadPatchIds = st.stepInfo.cadPatchIds;
+  const trisOf = (satFaces: number[]): Uint32Array => {
+    const dense = new Set<number>();
+    for (const f of satFaces) {
+      const m = matches.get(f);
+      if (m) dense.add(m.dense);
+    }
+    const out: number[] = [];
+    if (dense.size > 0) for (let t = 0; t < cadPatchIds.length; t++) if (dense.has(cadPatchIds[t])) out.push(t);
+    return Uint32Array.from(out);
+  };
+  const report: string[] = [];
+  const bcs: Bc[] = [];
+  const skip = (what: string) => report.push(`${what}: keine Fläche zugeordnet, übersprungen`);
+
+  for (const c of setup.constraints) {
+    const tris = trisOf(c.faces);
+    if (tris.length === 0) {
+      skip(`Lager "${c.name}"`);
+      continue;
+    }
+    const [ux, uy, uz] = c.fixed;
+    if (ux && uy && uz) {
+      bcs.push({ id: `bc${++bcCounter}`, kind: "fixed", name: c.name, tris });
+    } else if (ux || uy || uz) {
+      bcs.push({
+        id: `bc${++bcCounter}`,
+        kind: "displacement",
+        name: c.name,
+        tris,
+        axes: [ux, uy, uz],
+        disp: [0, 0, 0],
+      });
+      report.push(`Lager "${c.name}": nur die gesperrten Verschiebungsrichtungen übernommen`);
+    } else {
+      skip(`Lager "${c.name}" (keine Verschiebung gesperrt)`);
+    }
+  }
+  for (const l of setup.loads) {
+    const groups = l.perEntity && l.faces.length > 1 ? l.faces.map((f) => [f]) : [l.faces];
+    for (const g of groups) {
+      const tris = trisOf(g);
+      if (tris.length === 0) {
+        skip(`Last "${l.name}"`);
+        continue;
+      }
+      if (l.kind === "force") {
+        const F: [number, number, number] = [l.dir[0] * l.magnitude, l.dir[1] * l.magnitude, l.dir[2] * l.magnitude];
+        bcs.push({
+          id: `bc${++bcCounter}`,
+          kind: "force",
+          name: l.name,
+          tris,
+          force: F,
+          forceMode: "direction",
+          forceDir: l.dir,
+          forceMag: l.magnitude,
+          forceDirAuto: false,
+        });
+      } else {
+        const mag = l.magnitude * 1000; // N·m -> N·mm
+        bcs.push({
+          id: `bc${++bcCounter}`,
+          kind: "moment",
+          name: l.name,
+          tris,
+          moment: [l.dir[0] * mag, l.dir[1] * mag, l.dir[2] * mag],
+          momentMode: "direction",
+          momentDir: l.dir,
+          momentMag: mag,
+        });
+      }
+    }
+  }
+  if (setup.gravity && setup.gravity.magnitude > 0) {
+    report.push("Schwerkraft aus der Studie nicht übernommen (Eigengewicht ist bei Kunststoffbauteilen dieser Größe vernachlässigbar)");
+  }
+  report.push(...setup.ignored);
+  report.push(...problems);
+
+  // Material: Fusion materials are isotropic bulk plastics -> isotropic entry.
+  let materialNote = "";
+  if (setup.material) {
+    const mm = setup.material;
+    const m = isotropicMaterial({
+      name: `${mm.name} (Fusion)`,
+      e0: mm.e0,
+      nu: mm.nu,
+      density: mm.density,
+      yieldStrength: mm.yieldStrength || mm.tensileStrength,
+      ultimateStrength: mm.tensileStrength || mm.yieldStrength,
+      tangentModulus: mm.e0 / 100, // chart only; not in the Fusion export
+      strainAtRupture: 0.05, // chart only; not in the Fusion export
+      cte: mm.cte ?? 0,
+    });
+    const have = get().materials.findIndex((x) => x.name === m.name);
+    set({ materials: have >= 0 ? get().materials.map((x, i) => (i === have ? m : x)) : [...get().materials, m] });
+    get().setMaterial(m);
+    materialNote = ` Material "${m.name}" (E ${mm.e0.toFixed(0)} MPa, ν ${mm.nu}).`;
+  }
+
+  set({
+    bcs,
+    activeBcId: null,
+    activeStep: 2,
+    sdzPending: null,
+    notice:
+      `Setup aus "${setup.studyName}" übernommen: ${bcs.length} Randbedingung${bcs.length === 1 ? "" : "en"}.` +
+      materialNote +
+      (report.length ? ` Hinweise: ${report.join("; ")}.` : ""),
+  });
+  markResultsStale(set, get, "loads");
+  await pushBcs(get);
+  pushBcGlyphs(get, null);
+  appendLog(set, `Fusion-Setup "${setup.studyName}" angewendet: ${bcs.map((b) => b.name).join(", ")}`);
+  for (const [k, v] of matches) appendLog(set, `  SAT-Fläche ${k} -> STEP-Fläche ${v.dense} (${v.how})`);
+}
+
 function pushBcGlyphs(get: () => AppState, activeBcId?: string | null) {
   const id = activeBcId === undefined ? get().activeBcId : activeBcId;
   const step = activeStep(get());
@@ -4115,6 +4269,7 @@ export const useStore = create<AppState>((set, get) => ({
   activeBcId: null,
   loadSteps: [initialStep],
   activeLoadStepId: initialStep.id,
+  sdzPending: null,
   material: initialSettings.materials[0],
   materials: initialSettings.materials,
   // Mirror of the active set's curve (§24); falls back to the legacy value
@@ -4472,6 +4627,8 @@ export const useStore = create<AppState>((set, get) => ({
           `  ${model.bodyCount} separate bodies — not connected in the simulation (bodies only fuse across sub-voxel gaps)`
         );
       }
+      // Multi-material fork: a Fusion setup (.sdz) waiting for its geometry.
+      if (get().sdzPending) await applySdzSetup(set, get);
     } catch (e) {
       const emsg = e instanceof Error ? e.message : String(e);
       // A cancelled STEP conversion is the user's Stop, not an error.
@@ -4520,6 +4677,38 @@ export const useStore = create<AppState>((set, get) => ({
     set({ bcs, activeBcId: null, activeStep: 1, notice: SAMPLE_NOTICE, isSample: true });
     await pushBcs(get);
     pushBcGlyphs(get, null);
+  },
+
+  async loadFiles(files) {
+    const sdz = files.find((f) => /\.sdz$/i.test(f.name));
+    const rest = files.filter((f) => f !== sdz);
+    const geo = rest.find((f) => /\.(stl|3mf|step|stp)$/i.test(f.name));
+    if (!sdz) {
+      const f = files[0];
+      if (!f) return;
+      if (/\.filasim$/i.test(f.name)) await get().openProject(f);
+      else await get().loadFile(f.name, await f.arrayBuffer());
+      return;
+    }
+    try {
+      set({ busy: "Reading Fusion setup (.sdz)…", error: null });
+      const setup = await parseSdz(await sdz.arrayBuffer());
+      set({ sdzPending: setup, busy: null });
+    } catch (e) {
+      set({ busy: null, error: `.sdz konnte nicht gelesen werden: ${e instanceof Error ? e.message : String(e)}` });
+      return;
+    }
+    if (geo) {
+      // loadFile applies the pending setup itself once the model is in.
+      await get().loadFile(geo.name, await geo.arrayBuffer());
+    } else if (get().model && get().stepInfo) {
+      await applySdzSetup(set, get, true);
+    } else {
+      set({
+        notice:
+          "Setup aus der .sdz gelesen. Jetzt die STEP-Datei desselben Körpers laden (oder beide Dateien zusammen hineinziehen), dann werden Material, Lasten und Lager automatisch gesetzt.",
+      });
+    }
   },
 
   confirmImport(unitId, remember) {

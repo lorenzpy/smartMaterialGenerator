@@ -260,6 +260,7 @@ function StepModel() {
       model: s.model,
       isSample: s.isSample,
       loadFile: s.loadFile,
+      loadFiles: s.loadFiles,
       tool: s.tool,
       setTool: s.setTool,
       rotateModel: s.rotateModel,
@@ -267,18 +268,18 @@ function StepModel() {
     }))
   );
   const fileRef = useRef<HTMLInputElement>(null);
-  const onFile = async (f: File | undefined) => {
-    if (!f) return;
-    await s.loadFile(f.name, await f.arrayBuffer());
+  const onFile = async (files: File[]) => {
+    if (files.length > 0) await s.loadFiles(files);
   };
   return (
     <>
       <input
         ref={fileRef}
         type="file"
-        accept=".stl,.3mf,.step,.stp"
+        accept=".stl,.3mf,.step,.stp,.sdz"
+        multiple
         hidden
-        onChange={(e) => void onFile(e.target.files?.[0])}
+        onChange={(e) => void onFile(Array.from(e.target.files ?? []))}
       />
       <button
         // While the startup sample is loaded, a soft pulse marks this button
