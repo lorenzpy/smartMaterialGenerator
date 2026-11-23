@@ -37,6 +37,7 @@ export function StepRail() {
       hasResult: s.hasResult,
       optSummary: s.optSummary,
       appMode: s.appMode,
+      mmOn: s.mm.enabled,
       material: s.material,
       activeStep: s.activeStep,
       setActiveStep: s.setActiveStep,
@@ -52,6 +53,9 @@ export function StepRail() {
           ? { ...st, title: "5 · Optimization — part topology" }
           : st
     );
+  }
+  if (!buildsim && s.mmOn) {
+    STEPS = STEPS.map((st) => (st.n === 5 ? { ...st, title: "5 · Optimization — material distribution" } : st));
   }
   const hasSupport = s.bcs.some((b) => SUPPORT_KINDS.includes(b.kind) && b.tris.length > 0);
   const hasLoad = s.bcs.some((b) => {

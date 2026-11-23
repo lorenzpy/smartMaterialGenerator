@@ -18,7 +18,7 @@ const page = await ctx.newPage();
 const logs = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
-await page.goto("http://localhost:5173/", { waitUntil: "load" });
+await page.goto(process.env.URL ?? "http://localhost:5173/", { waitUntil: "load" });
 await page.locator("button.consent").click(); // per-session disclaimer, accepted by this local test
 await page.waitForTimeout(10000); // startup sample model
 // The same <input type=file> the "Replace model…" button opens.

@@ -1,80 +1,62 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Multi-material fork: drive the real app in Chromium — sample part with its
-// canned loads, open the multi-material panel, run, screenshot.
+// Multi-material fork: drive the real app through the normal steps —
+// Properties (pick materials) -> Optimize (run) — with service workers ENABLED,
+// exactly like a user's browser.
 // Usage: (dev server on :5173)  node scripts/e2e-mm.mjs [outDir] [cells] [iters]
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
 
 const out = process.argv[2] ?? "/tmp/mm-shots";
-const cells = process.argv[3] ?? "3000";
-const iters = process.argv[4] ?? "60";
+const cells = process.argv[3] ?? "2000";
+const iters = process.argv[4] ?? "30";
 mkdirSync(out, { recursive: true });
-
 const browser = await chromium.launch({
   executablePath: process.env.CHROME ?? "/opt/pw-browsers/chromium",
   args: ["--no-sandbox", "--use-gl=swiftshader", "--enable-unsafe-swiftshader"],
 });
-// No service worker: the cross-origin-isolation worker would switch the engine
-// to the threaded WASM build, which this checkout does not ship.
-const ctx = await browser.newContext({ viewport: { width: 1500, height: 900 }, serviceWorkers: "block" });
+const ctx = await browser.newContext({ viewport: { width: 1500, height: 950 } });
 const page = await ctx.newPage();
 const logs = [];
 page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
+await page.goto(process.env.URL ?? "http://localhost:5173/", { waitUntil: "load" });
+await page.locator("button.consent").click({ timeout: 30000 }); // per-session disclaimer, accepted by this local test
+await page.waitForTimeout(15000); // startup sample + canned loads
+const step = (label) => page.locator("button.station").filter({ hasText: new RegExp(label, "i") }).first().click();
 
-await page.goto("http://localhost:5173/", { waitUntil: "load" });
-// The app shows a per-session disclaimer; this local test accepts it.
-await page.locator("button.consent").click();
-// Wait for the sample model — give the importer time.
-await page.waitForTimeout(12000);
-await page.screenshot({ path: `${out}/1-loaded.png` });
+await step("Properties");
+await page.waitForTimeout(800);
+// The part's own material (PLA) is the first one of the mix; add two more with the same selector.
+const add = () => page.getByRole("button", { name: "+ Add another material" }).click();
+await add();
+await page.locator(".mmpick select").nth(0).selectOption("ASA");
+await add();
+await page.locator(".mmpick select").nth(1).selectOption({ label: "TPU 95A (Testwert)" });
+await page.waitForTimeout(500);
+await page.screenshot({ path: `${out}/1-properties.png` });
 
-await page.getByTestId("mm-toggle").click();
-await page.getByTestId("mm-panel").waitFor();
-// Set analysis cells and iterations through the labelled inputs.
-const setField = async (label, value) => {
-  const inp = page.locator(`label.mm-field:has(span:text-is("${label}")) input`).first();
-  await inp.fill(String(value));
+await step("Optimize");
+await page.waitForTimeout(800);
+const numAfter = async (label, value) => {
+  const g = page.locator(".group", { has: page.locator(`.g-label span:text-is("${label}")`) }).first();
+  await g.locator("input").first().fill(String(value));
 };
-await setField("cells", cells);
-await setField("iterations", iters);
-// Optional overrides: W_C / W_R objective weights, PLA_LIM (PLA stress limit,
-// MPa) so a low limit makes PLA fail at the sample load and a trade-off appears.
-if (process.env.W_C) await setField("deformation (stiffness)", process.env.W_C);
-if (process.env.W_R) await setField("failure risk (cracking)", process.env.W_R);
-if (process.env.PLA_LIM) {
-  await page.locator(".mm-mat").first().locator('label.mm-field:has(span:text-is("σ lim MPa")) input').fill(process.env.PLA_LIM);
-}
-await page.screenshot({ path: `${out}/2-panel.png` });
+await page.locator(".sec-head", { hasText: "Run settings" }).click().catch(() => {});
+await numAfter("Grid cells", cells);
+await numAfter("Iterations", iters);
+await page.screenshot({ path: `${out}/2-optimize.png` });
 
 const t0 = Date.now();
-await page.getByTestId("mm-run").click();
-let lastProgress = "";
-for (let i = 0; i < 900; i++) {
+await page.getByRole("button", { name: /Optimize material distribution/ }).click();
+for (let i = 0; i < 1500; i++) {
   if (await page.getByTestId("mm-result").count()) break;
-  const err = await page.locator(".mm-error").count();
-  if (err) break;
-  if (i % 10 === 0 && (await page.getByTestId("mm-progress").count())) {
-    lastProgress = await page.getByTestId("mm-progress").innerText();
-    if (i % 50 === 0) console.log("progress:", lastProgress);
-  }
+  if (i % 30 === 0 && (await page.getByTestId("mm-progress").count())) console.log("progress:", await page.getByTestId("mm-progress").innerText());
   await page.waitForTimeout(1000);
 }
 console.log("run wall time s:", ((Date.now() - t0) / 1000).toFixed(1));
-if (await page.locator(".mm-error").count()) console.log("ERROR:", await page.locator(".mm-error").innerText());
 if (await page.getByTestId("mm-result").count()) console.log(await page.getByTestId("mm-result").innerText());
+else console.log("NO RESULT; panel:", (await page.locator(".panel").first().innerText()).slice(0, 600));
 await page.waitForTimeout(1500);
 await page.screenshot({ path: `${out}/3-result.png` });
-// Close the panel for an unobstructed look at the multi-material surfaces,
-// then once more with the section plane on to look inside.
-await page.getByTestId("mm-toggle").click();
-await page.waitForTimeout(800);
-await page.screenshot({ path: `${out}/4-viewport.png` });
-const section = page.getByRole("button", { name: "Section" });
-if (await section.count()) {
-  await section.first().click();
-  await page.waitForTimeout(1200);
-  await page.screenshot({ path: `${out}/5-section.png` });
-}
-console.log(logs.filter((l) => /error|panic|wasm|unreachable/i.test(l)).slice(0, 10).join("\n"));
+console.log(logs.filter((l) => /error|panic|unreachable|engine:/i.test(l)).slice(0, 8).join("\n"));
 await browser.close();

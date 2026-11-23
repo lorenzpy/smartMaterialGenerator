@@ -25,6 +25,7 @@ import { fmtDisp, fmtLen, lenUnit, rampCss } from "./fmt";
 import { BC_HELP, bcLabel, KIND_DOT, KIND_LABEL, SUPPORT_KINDS } from "./bcmeta";
 import { HelpTip, InfoTip } from "./HelpTip";
 import { Section } from "./Section";
+import { MaterialMixGroup, StepOptimizeMulti } from "./MultiMaterial";
 import { ANALYZE_HELP, BUILD_HELP, EXPORT_HELP, MODEL_HELP, OPT_HELP, PROP_HELP } from "./helptext";
 import { SettingsOptimizer } from "./SettingsOptimizer";
 import { ValidateOrientation } from "./ValidateOrientation";
@@ -173,6 +174,7 @@ export function StepPanel() {
       activeStep: s.activeStep,
       appMode: s.appMode,
       material: s.material,
+      mmOn: s.mm.enabled,
       // re-render the whole panel subtree (all unit-bearing inputs/readouts) on
       // a unit change — saves wiring unitRev into every sub-editor.
       unitRev: s.unitRev,
@@ -222,6 +224,9 @@ export function StepPanel() {
     else if (step === 6)
       head = { title: "View & export", sub: "Inspect the result, export the optimized shape." };
   }
+  if (!buildsim && s.mmOn && step === 5) {
+    head = { title: "Optimization", sub: "Where each of the selected materials goes — stiff where it must carry, tough where it would crack." };
+  }
   return (
     <section className="panel" data-bcsection={!buildsim && step === 2 ? true : undefined}>
       <div className="p-head">
@@ -243,7 +248,7 @@ export function StepPanel() {
           {step === 2 && <StepBcs />}
           {step === 3 && <StepProperties />}
           {step === 4 && <StepAnalyze />}
-          {step === 5 && <StepOptimize />}
+          {step === 5 && (s.mmOn ? <StepOptimizeMulti /> : <StepOptimize />)}
           {step === 6 && <StepExport />}
         </>
       )}
@@ -1920,6 +1925,7 @@ function StepProperties() {
           </div>
         )}
       </div>
+      {!buildsim && <MaterialMixGroup />}
 
       {!iso && (
       <>

@@ -2,20 +2,6 @@
 // Multi-material fork: shared types for the multi-material panel, the engine
 // protocol and the viewport layer.
 
-/** One material of the part. Units: MPa, g/cm³, strain dimensionless. */
-export interface MmMaterial {
-  name: string;
-  e: number;
-  nu: number;
-  density: number;
-  /** Allowable von Mises stress (MPa); blank/0 = no limit. */
-  stressAllow: number;
-  /** Allowable strain; blank/0 = no limit. */
-  strainAllow: number;
-  /** Viewport color, "#rrggbb". */
-  color: string;
-}
-
 /** Options sent to the engine (`Model::mm_run`). */
 export interface MmOptions {
   materials: {
@@ -36,6 +22,8 @@ export interface MmOptions {
   maxIter: number;
   /** Also start from every single material and keep the best design. */
   multiStart: boolean;
+  /** Solid cells of this run's own grid. */
+  cells: number;
 }
 
 export interface MmProgress {
@@ -92,11 +80,73 @@ export interface MmOutput {
   regions: MmRegion[];
 }
 
-/** Default material library (TEST VALUES, not measured data). */
-export const MM_PRESETS: MmMaterial[] = [
-  { name: "PLA", e: 3500, nu: 0.35, density: 1.24, stressAllow: 50, strainAllow: 0.025, color: "#d9822b" },
-  { name: "ASA", e: 2400, nu: 0.37, density: 1.07, stressAllow: 43, strainAllow: 0.04, color: "#3b7dd8" },
-  { name: "TPU", e: 80, nu: 0.45, density: 1.21, stressAllow: 30, strainAllow: 0.2, color: "#2fa36b" },
-];
-
+/** Viewport colors of the materials of a mix, by position in the mix. */
 export const MM_PALETTE = ["#d9822b", "#3b7dd8", "#2fa36b", "#c04ba0", "#8a8f98", "#d6c21f"];
+export const mmColor = (i: number) => MM_PALETTE[i % MM_PALETTE.length];
+
+/** Multi-material settings — part of the app's settings: kept per browser and
+ *  saved in the project. The materials themselves are the app's material
+ *  library (Settings / Material manager); this only says WHICH of them take
+ *  part and how to weigh the objectives. */
+export interface MmSettings {
+  /** Derived: true as soon as at least one additional material is added
+   *  (switches the Optimize step). */
+  enabled: boolean;
+  /** Names of the ADDITIONAL library materials. The first material of the mix
+   *  is always the part's material chosen in the Properties step. */
+  names: string[];
+  /** Per material name: upper bound on its volume share in %, "" = none. */
+  maxPercent: Record<string, string>;
+  /** Weight of deformation (stiffness) in the objective. */
+  wCompliance: number;
+  /** Weight of cracking risk in the objective. */
+  wRisk: number;
+  riskExponent: number;
+  /** Name of the material kept at supports and load patches. */
+  keepName: string;
+  /** Solid cells of the multi-material run's own coarse grid. */
+  cells: number;
+  maxIter: number;
+  filterRadius: number;
+  multiStart: boolean;
+}
+
+export const defaultMmSettings = (): MmSettings => ({
+  enabled: false,
+  names: [],
+  maxPercent: {},
+  wCompliance: 1,
+  wRisk: 1,
+  riskExponent: 8,
+  keepName: "",
+  cells: 3000,
+  maxIter: 120,
+  filterRadius: 1.5,
+  multiStart: false,
+});
+
+/** Merge a stored/partial object into valid settings (unknown keys dropped). */
+export function sanitizeMm(raw: unknown): MmSettings {
+  const d = defaultMmSettings();
+  if (!raw || typeof raw !== "object") return d;
+  const r = raw as Partial<MmSettings>;
+  const n = (v: unknown, lo: number, hi: number, dflt: number) =>
+    typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt;
+  const names = Array.isArray(r.names) ? r.names.filter((x): x is string => typeof x === "string") : [];
+  return {
+    enabled: names.length > 0,
+    names,
+    maxPercent:
+      r.maxPercent && typeof r.maxPercent === "object"
+        ? Object.fromEntries(Object.entries(r.maxPercent).filter(([, v]) => typeof v === "string")) as Record<string, string>
+        : {},
+    wCompliance: n(r.wCompliance, 0, 1000, d.wCompliance),
+    wRisk: n(r.wRisk, 0, 1000, d.wRisk),
+    riskExponent: n(r.riskExponent, 2, 20, d.riskExponent),
+    keepName: typeof r.keepName === "string" ? r.keepName : "",
+    cells: n(r.cells, 500, 60000, d.cells),
+    maxIter: n(r.maxIter, 5, 1000, d.maxIter),
+    filterRadius: n(r.filterRadius, 1, 4, d.filterRadius),
+    multiStart: r.multiStart === true,
+  };
+}

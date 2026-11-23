@@ -343,6 +343,9 @@ export const DEFAULT_MATERIALS: Material[] = [
   { name: "PETG", e0: 2100, nu: 0.37, density: 1.27, strength: 45, strengthZ: 34, shrink: 0.004, shrinkZ: 0.002, yieldStrength: 40, tLock: 80, cte: 68e-6, tangentModulus: 120, strainAtRupture: 0.06 },
   { name: "ABS", e0: 2250, nu: 0.37, density: 1.05, strength: 38, strengthZ: 25, shrink: 0.008, shrinkZ: 0.004, yieldStrength: 33, tLock: 100, cte: 88e-6, tangentModulus: 140, strainAtRupture: 0.05 },
   { name: "ASA", e0: 2400, nu: 0.37, density: 1.07, strength: 43, strengthZ: 29, shrink: 0.006, shrinkZ: 0.003, yieldStrength: 38, tLock: 100, cte: 90e-6, tangentModulus: 200, strainAtRupture: 0.04 },
+  // TEST VALUES, not measured data: a soft TPU for multi-material studies.
+  // Replace with datasheet/test values (Material manager) before trusting results.
+  { name: "TPU 95A (Testwert)", e0: 80, nu: 0.45, density: 1.21, strength: 30, strengthZ: 24, shrink: 0.008, shrinkZ: 0.004, yieldStrength: 12, tLock: 60, cte: 150e-6, tangentModulus: 20, strainAtRupture: 0.2 },
   // Isotropic (no build direction): SF runs against YIELD for these — a steel
   // bracket at 90 % of ultimate is already bent. Values: S235/A36-class mild
   // steel, 6061-T6 datasheet, post-cured standard SLA resin. Tangent moduli

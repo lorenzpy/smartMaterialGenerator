@@ -37,33 +37,41 @@ let pendingProject: Uint8Array | null = null;
 // (SharedArrayBuffer available); otherwise the single-threaded fallback.
 // Both expose the identical Model API.
 const ready = (async () => {
+  // Multi-material fork: the threaded build is optional. A page can be
+  // cross-origin isolated (the coi service worker does that on every host)
+  // without the threaded module being shipped — then fall back to the
+  // single-threaded module instead of failing the whole app.
   if (self.crossOriginIsolated) {
-    // Static asset (web/public/wasm-mt), deliberately NOT bundled — the
-    // rayon pool workers re-import the glue by plain relative URL.
-    const mt = (await import(
-      /* @vite-ignore */ new URL(import.meta.env.BASE_URL + "wasm-mt/filasim_wasm.js", self.location.origin).href
-    )) as typeof import("../wasm/filasim_wasm.js") & {
-      initThreadPool(threads: number): Promise<unknown>;
-    };
-    await mt.default();
-    const threads = Math.max(1, navigator.hardwareConcurrency || 4);
-    await mt.initThreadPool(threads);
-    ModelCtor = mt.Model;
-    setCancelFlagFn = mt.set_cancel_flag;
-    setProgressBufferFn = mt.set_progress_buffer;
-    projectManifestFn = mt.project_manifest;
-    projectModelFn = mt.project_model;
-    console.info(`engine: threaded wasm (${threads} threads)`);
-  } else {
-    const st = await import("../wasm/filasim_wasm.js");
-    await st.default();
-    ModelCtor = st.Model;
-    setCancelFlagFn = st.set_cancel_flag;
-    setProgressBufferFn = st.set_progress_buffer;
-    projectManifestFn = st.project_manifest;
-    projectModelFn = st.project_model;
-    console.info("engine: single-threaded wasm (page not cross-origin isolated)");
+    try {
+      // Static asset (web/public/wasm-mt), deliberately NOT bundled — the
+      // rayon pool workers re-import the glue by plain relative URL.
+      const mt = (await import(
+        /* @vite-ignore */ new URL(import.meta.env.BASE_URL + "wasm-mt/filasim_wasm.js", self.location.origin).href
+      )) as typeof import("../wasm/filasim_wasm.js") & {
+        initThreadPool(threads: number): Promise<unknown>;
+      };
+      await mt.default();
+      const threads = Math.max(1, navigator.hardwareConcurrency || 4);
+      await mt.initThreadPool(threads);
+      ModelCtor = mt.Model;
+      setCancelFlagFn = mt.set_cancel_flag;
+      setProgressBufferFn = mt.set_progress_buffer;
+      projectManifestFn = mt.project_manifest;
+      projectModelFn = mt.project_model;
+      console.info(`engine: threaded wasm (${threads} threads)`);
+      return;
+    } catch (e) {
+      console.warn("engine: threaded wasm not available, using the single-threaded module —", e);
+    }
   }
+  const st = await import("../wasm/filasim_wasm.js");
+  await st.default();
+  ModelCtor = st.Model;
+  setCancelFlagFn = st.set_cancel_flag;
+  setProgressBufferFn = st.set_progress_buffer;
+  projectManifestFn = st.project_manifest;
+  projectModelFn = st.project_model;
+  console.info("engine: single-threaded wasm");
 })();
 
 /** Typed success reply: `data` is checked against the op's entry in

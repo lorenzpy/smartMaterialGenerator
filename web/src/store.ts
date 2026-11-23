@@ -44,6 +44,7 @@ import {
 import { buildBinaryStl, connectedBodies, isIdentityTransform } from "./engine/assembly";
 import { SAMPLE_BCS, SAMPLE_FILE, SAMPLE_MESH, SAMPLE_NOTICE, sampleUrl } from "./sampleModel";
 import { matchFaces, parseSdz, type SdzSetup } from "./engine/sdz/sdz";
+import { defaultMmSettings, mmColor, sanitizeMm, type MmOptions, type MmProgress, type MmSettings, type MmSummary } from "./mm/types";
 import { ENVELOPE_STEP, FieldServer, isEnvelope, resultIsSolidBody } from "./engine/FieldServer";
 import type {
   Bc,
@@ -140,6 +141,8 @@ interface PersistedSettings {
    *  built-ins once. Present ⇒ the user's list is theirs (deleting every
    *  isotropic material sticks). */
   seededIsotropic?: boolean;
+  /** Same idea for the TPU test material of the multi-material fork. */
+  seededTpu?: boolean;
 }
 
 function loadSettings(): PersistedSettings {
@@ -214,6 +217,11 @@ function loadSettings(): PersistedSettings {
         fallback.materials.push(
           ...DEFAULT_MATERIALS.filter((m) => isIsotropic(m)).map((m) => ({ ...m }))
         );
+      }
+      // Multi-material fork: append the TPU test material once to older saves.
+      if (p.seededTpu !== true && !fallback.materials.some((m) => /^TPU/i.test(m.name))) {
+        const tpu = DEFAULT_MATERIALS.find((m) => /^TPU/i.test(m.name));
+        if (tpu) fallback.materials.push({ ...tpu });
       }
     }
     // Retired patterns in a stored settings blob are ignored (DESIGN §22).
@@ -454,7 +462,7 @@ function saveSettings(
   try {
     localStorage.setItem(
       SETTINGS_KEY,
-      JSON.stringify({ materials, curves, levels, seededIsotropic: true })
+      JSON.stringify({ materials, curves, levels, seededIsotropic: true, seededTpu: true })
     );
   } catch {
     // storage full/blocked: settings just won't persist
@@ -462,6 +470,51 @@ function saveSettings(
 }
 
 const initialSettings = loadSettings();
+
+// ---- multi-material settings (per browser; also saved in the project) ----
+const MM_KEY = "sig.mm.v1";
+function loadMm(): MmSettings {
+  try {
+    const raw = localStorage.getItem(MM_KEY);
+    return raw ? sanitizeMm(JSON.parse(raw)) : defaultMmSettings();
+  } catch {
+    return defaultMmSettings();
+  }
+}
+function saveMm(mm: MmSettings) {
+  try {
+    localStorage.setItem(MM_KEY, JSON.stringify(mm));
+  } catch {
+    // storage blocked: the settings just won't persist
+  }
+}
+
+/** The materials of a multi-material part: the part's material first, then the
+ *  additional ones (library names, duplicates and unknown names dropped). */
+export function mmMix(primary: Material, library: Material[], extra: string[]): Material[] {
+  const out: Material[] = [primary];
+  for (const n of extra) {
+    const m = library.find((x) => x.name === n);
+    if (m && !out.some((o) => o.name === m.name)) out.push(m);
+  }
+  return out;
+}
+
+/** State of the last multi-material run. */
+export interface MmRunState {
+  running: boolean;
+  progress: MmProgress | null;
+  history: MmProgress[];
+  summary: MmSummary | null;
+  /** Viewport color per material of the result, by name. */
+  colors: Record<string, string>;
+  /** True once loads, supports or materials changed after the run. */
+  stale: boolean;
+  error: string | null;
+}
+const emptyMmRun = (): MmRunState => ({ running: false, progress: null, history: [], summary: null, colors: {}, stale: false, error: null });
+/** Last result's surfaces, kept outside the reactive state (typed arrays). */
+let mmParts: { color: string; positions: Float32Array; indices: Uint32Array }[] | null = null;
 
 // ---- infill property library (DESIGN §24) ----
 // Loaded after the legacy settings so a pre-§24 user-calibrated curve can be
@@ -978,6 +1031,14 @@ interface AppState {
   /** Multi-material fork: Fusion simulation setup (.sdz) waiting for its
    *  geometry. Applied automatically as soon as a STEP model is loaded. */
   sdzPending: SdzSetup | null;
+  /** Multi-material settings (Properties: which library materials take part;
+   *  Optimize: objectives, budgets, run). */
+  mm: MmSettings;
+  mmRun: MmRunState;
+  setMm(patch: Partial<MmSettings>): void;
+  /** Run the multi-material optimization on the current setup. */
+  runMultiMaterial(): Promise<void>;
+  clearMultiMaterial(): void;
   /** Open one or several dropped/selected files. A `.sdz` (Fusion simulation
    *  export) together with a STEP file loads the model and applies the
    *  study's material, loads and supports automatically; a `.sdz` alone is
@@ -3208,6 +3269,11 @@ function markResultsStale(
   get: () => AppState,
   ...keys: (keyof ResultEpochs)[]
 ) {
+  // Multi-material result: outdated once loads, supports or materials change.
+  const mmr = get().mmRun;
+  if (mmr.summary && !mmr.stale && (keys.includes("loads") || keys.includes("material"))) {
+    set({ mmRun: { ...mmr, stale: true } });
+  }
   if (get().results.length === 0) return;
   const ep = { ...get().resultEpochs };
   for (const k of keys) ep[k] += 1;
@@ -4138,6 +4204,7 @@ function collectSettings(s: AppState) {
     exportSlicer: s.exportSlicer,
     densityThreshold: s.densityThreshold,
     resultSurface: s.resultSurface,
+    mm: s.mm,
   };
 }
 type ProjectSettings = ReturnType<typeof collectSettings>;
@@ -4270,6 +4337,8 @@ export const useStore = create<AppState>((set, get) => ({
   loadSteps: [initialStep],
   activeLoadStepId: initialStep.id,
   sdzPending: null,
+  mm: loadMm(),
+  mmRun: emptyMmRun(),
   material: initialSettings.materials[0],
   materials: initialSettings.materials,
   // Mirror of the active set's curve (§24); falls back to the legacy value
@@ -4415,6 +4484,8 @@ export const useStore = create<AppState>((set, get) => ({
     set({ activeStep: target });
     // The symmetry plane is an Optimize-step editing aid — hide it elsewhere.
     pushSymmetry(get);
+    // Multi-material result surfaces replace the part only in the Optimize step.
+    sceneEvents.onMultiMaterial?.(target === 5 && get().mm.enabled ? mmParts : null);
   },
 
   async loadFile(name, bytes, unitId, sampleCache) {
@@ -4597,6 +4668,9 @@ export const useStore = create<AppState>((set, get) => ({
       sceneEvents.onAnimateMode?.(null);
       sceneEvents.onVoxelMesh?.(null, null);
       sceneEvents.onOptShape?.(null, null);
+      mmParts = null;
+      sceneEvents.onMultiMaterial?.(null);
+      set({ mmRun: emptyMmRun() });
       sceneEvents.onModelLoaded?.(model);
       // CAD colors + exact CAD edges ride separately from the model payload.
       sceneEvents.onCadColors?.(get().cadColors ? (stepInfo?.cadTriColors ?? null) : null);
@@ -4708,6 +4782,78 @@ export const useStore = create<AppState>((set, get) => ({
         notice:
           "Setup aus der .sdz gelesen. Jetzt die STEP-Datei desselben Körpers laden (oder beide Dateien zusammen hineinziehen), dann werden Material, Lasten und Lager automatisch gesetzt.",
       });
+    }
+  },
+
+  setMm(patch) {
+    const mm = sanitizeMm({ ...get().mm, ...patch });
+    set({ mm });
+    saveMm(mm);
+  },
+
+  clearMultiMaterial() {
+    mmParts = null;
+    sceneEvents.onMultiMaterial?.(null);
+    set({ mmRun: emptyMmRun() });
+  },
+
+  async runMultiMaterial() {
+    const st = get();
+    if (st.mmRun.running || st.busy) return;
+    if (!st.model) {
+      set({ mmRun: { ...st.mmRun, error: "Load a model first." } });
+      return;
+    }
+    const mats = mmMix(st.material, st.materials, st.mm.names);
+    if (mats.length < 2) {
+      set({ mmRun: { ...emptyMmRun(), error: "Add at least one more material in the Properties step." } });
+      return;
+    }
+    const keepIdx = Math.max(0, mats.findIndex((m) => m.name === st.mm.keepName));
+    const opts: MmOptions = {
+      // Failure limits come from the library: the yield strength of isotropic
+      // materials, the (conservative) tensile strength of printed ones, and
+      // the strain at rupture when the material has one.
+      materials: mats.map((m) => ({
+        name: m.name,
+        e: m.e0,
+        nu: m.nu,
+        density: m.density,
+        stressAllow: (isIsotropic(m) ? m.yieldStrength : m.strength) || undefined,
+        strainAllow: m.strainAtRupture && m.strainAtRupture > 0 ? m.strainAtRupture : undefined,
+      })),
+      wCompliance: st.mm.wCompliance,
+      wRisk: st.mm.wRisk,
+      riskExponent: st.mm.riskExponent,
+      maxFraction: mats.map((m) => {
+        const v = (st.mm.maxPercent[m.name] ?? "").trim();
+        return v === "" ? null : Math.max(0, Math.min(100, Number(v) || 0)) / 100;
+      }),
+      keepMaterial: keepIdx,
+      filterRadius: st.mm.filterRadius,
+      maxIter: st.mm.maxIter,
+      multiStart: st.mm.multiStart,
+      cells: st.mm.cells,
+    };
+    const colors: Record<string, string> = {};
+    mats.forEach((m, i) => (colors[m.name] = mmColor(i)));
+    mmParts = null;
+    sceneEvents.onMultiMaterial?.(null);
+    set({ mmRun: { ...emptyMmRun(), running: true, colors } });
+    try {
+      await pushBcs(get);
+      const out = await engine.mmRun(opts, (p) =>
+        set((cur) => ({ mmRun: { ...cur.mmRun, progress: p, history: [...cur.mmRun.history, p] } }))
+      );
+      mmParts = out.regions.map((r) => ({
+        color: colors[mats[r.material]?.name ?? ""] ?? "#888888",
+        positions: r.positions,
+        indices: r.indices,
+      }));
+      set((cur) => ({ mmRun: { ...cur.mmRun, running: false, summary: out.summary, stale: false } }));
+      if (get().activeStep === 5) sceneEvents.onMultiMaterial?.(mmParts);
+    } catch (e) {
+      set((cur) => ({ mmRun: { ...cur.mmRun, running: false, error: e instanceof Error ? e.message : String(e) } }));
     }
   },
 
@@ -7866,6 +8012,8 @@ export const useStore = create<AppState>((set, get) => ({
         buildBedTemp: st.buildBedTemp ?? 60,
         buildChamberTemp: st.buildChamberTemp ?? 25,
         budget: st.budget,
+        // Additive (multi-material fork): absent in files saved before it.
+        mm: sanitizeMm((st as Partial<ProjectSettings>).mm),
         smoothIters: st.smoothIters,
         nBins: st.nBins,
         minMemberMm: st.minMemberMm,

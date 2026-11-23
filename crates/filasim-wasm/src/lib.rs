@@ -1501,10 +1501,17 @@ impl Model {
     /// from exploding the cell count. Shared by `ensure_grid` and the build sim
     /// (which scales it up for a coarser grid).
     fn analysis_h(&self) -> Result<f64, JsValue> {
+        self.analysis_h_for(self.target_cells as f64, self.fixed_h)
+    }
+
+    /// [`analysis_h`] for an explicit cell target / fixed size (the
+    /// multi-material run uses its own coarse grid without touching the
+    /// model's analysis grid).
+    fn analysis_h_for(&self, target_cells: f64, fixed_h: Option<f64>) -> Result<f64, JsValue> {
         let (lo, hi) = self.mesh.bounds().ok_or_else(|| err("empty mesh"))?;
         let bbox_vol =
             (hi[0] - lo[0]).max(1e-6) * (hi[1] - lo[1]).max(1e-6) * (hi[2] - lo[2]).max(1e-6);
-        let h = if let Some(fh) = self.fixed_h {
+        let h = if let Some(fh) = fixed_h {
             // Custom mode: the user's exact cell size, snapped to the wall when
             // snapping is on, floored so it can't blow the cell budget.
             let h = if self.snap_wall > 0.0 {
@@ -1524,7 +1531,7 @@ impl Model {
             filasim_core::voxel::pick_voxel_size(
                 fill_vol,
                 bbox_vol,
-                self.target_cells as f64,
+                target_cells,
                 self.snap_wall,
             )
         };
@@ -5426,6 +5433,13 @@ struct MmOpts {
     /// Also start from every single material and keep the best design.
     #[serde(default)]
     multi_start: bool,
+    /// Solid cells of the grid used for this run (own grid; the model's
+    /// analysis grid and its results are not touched).
+    #[serde(default = "mm_cells")]
+    cells: usize,
+}
+fn mm_cells() -> usize {
+    3000
 }
 fn mm_one() -> f64 {
     1.0
@@ -5451,15 +5465,18 @@ impl Model {
         use filasim_core::materials::{MaterialMap, MaterialProps};
         use filasim_core::mmgen::{optimize_best_of, Budget, MgConfig};
 
-        self.ensure_grid()?;
         let opts: MmOpts = serde_json::from_str(opts_json).map_err(err)?;
         if opts.materials.len() < 2 {
             return Err(err("need at least two materials"));
         }
-        let (grid, levels) = {
-            let (g, l) = self.grid.as_ref().unwrap();
-            (g.clone(), *l)
-        };
+        // Own grid for this run: the multi-material optimizer solves twice per
+        // iteration, so it needs a much coarser grid than the analysis one.
+        let h = self.analysis_h_for(opts.cells.clamp(500, 100_000) as f64, None)?;
+        let raw = VoxelGrid::voxelize(&self.mesh_orig, h);
+        if raw.solid_count() == 0 {
+            return Err(err("voxelization produced no solid cells — model too thin for this resolution"));
+        }
+        let (grid, levels) = pad_for_levels(&raw, self.settings.max_levels);
         let asm = assemble(&self.mesh, &grid, &self.bcs, None, &self.settings).map_err(err)?;
         let report = check_problem(&grid, &asm);
         if !report.ok {

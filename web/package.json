@@ -17,7 +17,8 @@
     "dev:st": "vite --config vite.st.config.ts",
     "e2e:mm": "node scripts/e2e-mm.mjs",
     "check:sdz": "node --experimental-strip-types scripts/check-sdz.mjs",
-    "e2e:sdz": "node scripts/e2e-sdz.mjs"
+    "e2e:sdz": "node scripts/e2e-sdz.mjs",
+    "build:st": "tsc -b && vite build --config vite.st.config.ts"
   },
   "dependencies": {
     "meshstep": "0.1.1",
