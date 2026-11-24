@@ -6,7 +6,8 @@ node_modules/
 /web/dist
 
 # Generated WASM (wasm-pack): single-threaded + threaded solver builds
-/web/src/wasm/
+# (web/src/wasm/ holds the prebuilt single-threaded WASM in this fork so the app
+#  starts without a Rust toolchain; `npm run wasm:st` rebuilds it)
 /web/public/wasm-mt/
 
 # STEP-import dev harness build (stepnode_test.mjs builds this pkg)

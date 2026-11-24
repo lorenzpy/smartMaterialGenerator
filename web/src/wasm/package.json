@@ -1,0 +1,16 @@
+{
+  "name": "filasim-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "files": [
+    "filasim_wasm_bg.wasm",
+    "filasim_wasm.js",
+    "filasim_wasm.d.ts"
+  ],
+  "main": "filasim_wasm.js",
+  "types": "filasim_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
