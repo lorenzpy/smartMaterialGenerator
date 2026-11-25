@@ -123,6 +123,53 @@ fn gradients_with_adjoint_match_finite_differences_three_materials() {
 }
 
 #[test]
+fn layer_adhesion_gradients_match_finite_differences() {
+    // Test values for the tension allowable across layers (MPa).
+    let mut s = setup(12, 4, 4, 30.0, None);
+    s.table[0] = s.table[0].clone().with_layer_limit(3.0);
+    s.table[1] = s.table[1].clone().with_layer_limit(4.0);
+    s.table[2] = s.table[2].clone().with_layer_limit(5.0);
+    let g = &s.grid;
+    let start = MaterialMap::uniform(g, s.table.clone(), 0, 0);
+    let b = SolveSettings { tol: 1e-13, max_iter: 30000, ..Default::default() };
+    let mask = ends_mask(&s);
+    let mut ctx = MgContext::new(g, s.levels, &s.problem, &start, &mask, b).unwrap();
+    let (n, nm) = (g.cell_count(), 3);
+    let mut st = 11u64;
+    let mut rho = vec![0.0; n * nm];
+    for i in 0..n {
+        if g.scale[i] > 0.0 {
+            let r: Vec<f64> = (0..nm).map(|_| 0.15 + lcg(&mut st)).collect();
+            let z: f64 = r.iter().sum();
+            for m in 0..nm {
+                rho[i * nm + m] = r[m] / z;
+            }
+        }
+    }
+    let (p, q) = (2.0, 6.0);
+    ctx.set_layer_adhesion(false, 1.0);
+    let r_off = ctx.eval(&rho, p, q, true).unwrap().risk;
+    ctx.set_layer_adhesion(true, 0.5);
+    let ev = ctx.eval(&rho, p, q, true).unwrap();
+    println!("risk without layer check {r_off:.5}, with {:.5}", ev.risk);
+    assert!(ev.risk > r_off * 1.001, "layer term must raise the risk");
+    let mut idx: Vec<usize> = (0..n * nm).filter(|&k| g.scale[k / nm] > 0.0).collect();
+    idx.sort_by(|&a, &b| ev.grad_r[b].abs().partial_cmp(&ev.grad_r[a].abs()).unwrap());
+    let mut worst = 0f64;
+    for &k in idx.iter().take(10) {
+        let d = 1e-5;
+        let (mut rp, mut rm) = (rho.clone(), rho.clone());
+        rp[k] += d;
+        rm[k] -= d;
+        let fd = (ctx.eval(&rp, p, q, true).unwrap().risk - ctx.eval(&rm, p, q, true).unwrap().risk) / (2.0 * d);
+        let rel = (fd - ev.grad_r[k]).abs() / ev.grad_r[k].abs().max(1e-9);
+        worst = worst.max(rel);
+        println!("layer risk entry {k:4} analytic {:+.5e} fd {:+.5e} rel {:.1e}", ev.grad_r[k], fd, rel);
+    }
+    assert!(worst < 5e-3, "layer-adhesion risk gradient off: {worst:.1e}");
+}
+
+#[test]
 fn pure_stiffness_objective_picks_the_stiffest_material() {
     let s = setup(24, 6, 6, 40.0, None);
     let g = &s.grid;

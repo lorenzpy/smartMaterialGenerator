@@ -2447,6 +2447,11 @@ export class SceneManager {
     this.results.setMeshFieldColor(on);
   }
 
+  /** Multi-material fork: colour the Mesh-view cells by material (null = off). */
+  setMeshMaterials(palette: string[] | null) {
+    this.results.setMeshMaterials(palette);
+  }
+
   /** Voxel-true section active: the cut lives in the geometry, so the voxel
    *  group must NOT also be plane-clipped (and its stencil cap hides). */
   setVoxelCutActive(on: boolean) {

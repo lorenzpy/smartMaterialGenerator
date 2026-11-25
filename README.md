@@ -68,9 +68,19 @@ material and only adds the Fusion material to the list.
    material distribution: objective weights (deformation vs cracking risk), maximum
    share per material, which material stays at supports and loads, and run
    settings (grid cells, iterations, filter radius, several starts).
-3. Run. The result appears in the viewport (one colour per material) with a table
+3. Optional, section **Printing** in the same step:
+   - **Printed skin stays \<keep material\>:** the walls from Properties (perimeters ×
+     line width) are fixed to the material kept at supports and loads, so the other
+     materials sit inside the part, not on its outside.
+   - **Layer adhesion:** adds tension across the printed layers (σzz, z = build
+     direction) to the failure index, using each material's interlayer strength
+     (`strengthZ` in the material library). Where two different materials meet along z,
+     the interface is weaker: **Bond between different materials** (% of the weaker
+     material, test value 60).
+4. Run. The result appears in the viewport (one colour per material) with a table
    comparing the optimized design with each single-material part. If a single
-   material is better, the optimizer returns that one.
+   material is better, the optimizer returns that one. In the **Mesh** view every
+   voxel cell of the analysis grid is coloured by its material, also in the section.
 
 Settings are stored per browser and inside saved projects (older projects still
 open unchanged).
@@ -85,6 +95,11 @@ in step 2 before running anything. Tested with one sample file only.
 
 - **Test values.** Material data (including TPU 95A) are placeholders. Replace them
   with measured values in ⚙ Settings.
+- **Layer adhesion model.** Interlayer strength and bond factor are simple,
+  unvalidated assumptions (a quadratic failure index in σvm and tension across
+  layers, plus a bond reduction between different materials in z-neighbour cells).
+  There are no fibre paths and no anisotropic (fibre-reinforced) material model.
+  The Mesh view colours by the material of the coarse run grid, not by a separate fine design.
 - **Often no useful mixed design.** In force-controlled load cases a stiff single
   material usually wins. A clear advantage appeared only with imposed deformation
   (e.g. a short TPU hinge in series with a stiff spring); displacement-controlled

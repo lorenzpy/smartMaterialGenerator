@@ -44,6 +44,9 @@ export class ResultSurfaceManager {
   meshDensity = false;
   // Force the density ramp on mesh cells (inherent-strain layer view).
   meshFieldColor = false;
+  /** Multi-material fork: palette (hex per material index); when set, the
+   *  per-vertex value channel carries material indices and colours the cells. */
+  meshMaterials: string[] | null = null;
 
   // Build-sim live preview: faint full-hull ghost (deactivated voxels) + a
   // growing deformed active hull (already-printed voxels, exaggeration baked in).
@@ -340,6 +343,13 @@ export class ResultSurfaceManager {
     return this.host.viewMode() === "deformed" && this.resultSurface === "voxel" && !!this.voxRes;
   }
 
+  /** Colour the mesh-view cells by material (palette index = material index);
+   *  null returns to the density/flat colouring. */
+  setMeshMaterials(palette: string[] | null) {
+    this.meshMaterials = palette;
+    this.applyMeshTint();
+  }
+
   /** Color the mesh-view cells by element density (0–1 ramp). */
   setMeshDensity(on: boolean) {
     this.meshDensity = on;
@@ -367,8 +377,14 @@ export class ResultSurfaceManager {
     // infill-density legend, plain 0–1 scale (1 = solid skin). Off: the
     // flat chassis gray-blue.
     const c = new THREE.Color();
+    const pal = this.meshMaterials;
     for (let v = 0; v < arr.length / 3; v++) {
-      if ((this.meshDensity || this.meshFieldColor) && density) {
+      if (pal && pal.length && density) {
+        c.set(pal[Math.round(density[v]) % pal.length]);
+        arr[3 * v] = c.r;
+        arr[3 * v + 1] = c.g;
+        arr[3 * v + 2] = c.b;
+      } else if ((this.meshDensity || this.meshFieldColor) && density) {
         c.setRGB(...ramp(Math.min(1, Math.max(0, density[v]))));
         arr[3 * v] = c.r;
         arr[3 * v + 1] = c.g;

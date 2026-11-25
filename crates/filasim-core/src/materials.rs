@@ -42,6 +42,9 @@ pub struct MaterialProps {
     pub stress_allow: f64,
     /// Allowable (stress-equivalent) strain; `INFINITY` = not specified.
     pub strain_allow: f64,
+    /// Allowable tensile stress ACROSS the printed layers (layer adhesion,
+    /// MPa); `INFINITY` = not specified (no layer check for this material).
+    pub stress_allow_z: f64,
 }
 
 impl MaterialProps {
@@ -53,7 +56,14 @@ impl MaterialProps {
             density,
             stress_allow: f64::INFINITY,
             strain_allow: f64::INFINITY,
+            stress_allow_z: f64::INFINITY,
         }
+    }
+
+    /// Set the allowable tension across layers (MPa).
+    pub fn with_layer_limit(mut self, stress_allow_z: f64) -> Self {
+        self.stress_allow_z = stress_allow_z;
+        self
     }
 
     /// Set the failure limits (stress in MPa, strain dimensionless).

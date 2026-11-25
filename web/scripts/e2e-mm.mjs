@@ -44,6 +44,8 @@ const numAfter = async (label, value) => {
 await page.locator(".sec-head", { hasText: "Run settings" }).click().catch(() => {});
 await numAfter("Grid cells", cells);
 await numAfter("Iterations", iters);
+if (process.env.MAXPLA) await page.locator(".mmrow input.mmpct").first().fill(process.env.MAXPLA);
+await page.locator(".sec-head", { hasText: "Printing" }).click().catch(() => {});
 await page.screenshot({ path: `${out}/2-optimize.png` });
 
 const t0 = Date.now();
@@ -58,5 +60,16 @@ if (await page.getByTestId("mm-result").count()) console.log(await page.getByTes
 else console.log("NO RESULT; panel:", (await page.locator(".panel").first().innerText()).slice(0, 600));
 await page.waitForTimeout(1500);
 await page.screenshot({ path: `${out}/3-result.png` });
+// Mesh view: the voxel cells coloured by material.
+await page.locator(".viewchips button, .chips button").filter({ hasText: /^Mesh$/ }).first().click().catch(async () => {
+  await page.getByRole("button", { name: "Mesh", exact: true }).first().click();
+});
+await page.waitForTimeout(4000);
+await page.screenshot({ path: `${out}/4-mesh.png` });
+if (process.env.SECTION) {
+  await page.getByRole("button", { name: "Section", exact: true }).first().click().catch(() => {});
+  await page.waitForTimeout(4000);
+  await page.screenshot({ path: `${out}/5-mesh-section.png` });
+}
 console.log(logs.filter((l) => /error|panic|unreachable|engine:/i.test(l)).slice(0, 8).join("\n"));
 await browser.close();

@@ -580,6 +580,8 @@ pub struct Model {
     /// Multi-material fork: result of the last `mm_run` (region meshes per
     /// material, ready for the viewport).
     mm_regions: Vec<(u8, RegionMesh)>,
+    /// Material id per cell of the last multi-material run's grid (Mesh view).
+    mm_field: Option<MmField>,
     /// Working mesh: display + segmentation + BC attachment + voxelization.
     /// Subdivided at load so deformed shapes can actually bend (a coarse STL
     /// face has no vertices to carry the curve).
@@ -959,6 +961,7 @@ impl Model {
         let bodies = body_count(&mesh_orig);
         Model {
             mm_regions: Vec::new(),
+            mm_field: None,
             mesh,
             mesh_orig,
             parents,
@@ -5396,6 +5399,17 @@ pub extern "C" fn bench_solve(nx: u32, ny: u32, nz: u32, h: f64) -> f64 {
 
 // ======================= multi-material fork (mm_*) ==========================
 
+/// Material ids of the last multi-material run, with the grid they live on.
+struct MmField {
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    h: f64,
+    origin: [f64; 3],
+    scale: Vec<f32>,
+    id: Vec<u8>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MmMaterialOpt {
@@ -5407,6 +5421,9 @@ struct MmMaterialOpt {
     stress_allow: Option<f64>,
     #[serde(default)]
     strain_allow: Option<f64>,
+    /// Allowable tension across the printed layers (layer adhesion, MPa).
+    #[serde(default)]
+    stress_allow_z: Option<f64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -5437,6 +5454,20 @@ struct MmOpts {
     /// analysis grid and its results are not touched).
     #[serde(default = "mm_cells")]
     cells: usize,
+    /// Printed skin (mm): cells closer than this to the surface stay the
+    /// `keep_material`, so the other materials sit INSIDE the part. 0 = off.
+    #[serde(default)]
+    skin_mm: f64,
+    /// Layer-adhesion check across the build direction (grid z).
+    #[serde(default)]
+    layer_adhesion: bool,
+    /// Strength factor of an interface between different materials relative
+    /// to the weaker one (0.05–1).
+    #[serde(default = "mm_bond")]
+    bond_factor: f64,
+}
+fn mm_bond() -> f64 {
+    0.6
 }
 fn mm_cells() -> usize {
     3000
@@ -5488,6 +5519,7 @@ impl Model {
             .map(|m| {
                 MaterialProps::new(&m.name, m.e, m.nu, m.density)
                     .with_limits(m.stress_allow.unwrap_or(f64::INFINITY), m.strain_allow.unwrap_or(f64::INFINITY))
+                    .with_layer_limit(m.stress_allow_z.unwrap_or(f64::INFINITY))
             })
             .collect();
         let nm = table.len();
@@ -5524,6 +5556,38 @@ impl Model {
                 }
             }
         }
+        // Printed skin: cells within `skin_mm` of the surface (void or the
+        // grid edge) stay the keep material. Chebyshev distance in cells.
+        let skin_cells = if opts.skin_mm > 0.0 { ((opts.skin_mm / grid.h).ceil() as usize).max(1) } else { 0 };
+        if skin_cells > 0 {
+            let r = skin_cells as i64;
+            for cz in 0..grid.nz {
+                for cy in 0..grid.ny {
+                    for cx in 0..grid.nx {
+                        let ci = (cz * grid.ny + cy) * grid.nx + cx;
+                        if grid.scale[ci] <= 0.0 || fixed[ci] >= 0 {
+                            continue;
+                        }
+                        let mut near_surface = false;
+                        'scan: for dz in -r..=r {
+                            for dy in -r..=r {
+                                for dx in -r..=r {
+                                    let (x, y, z) = (cx as i64 + dx, cy as i64 + dy, cz as i64 + dz);
+                                    let outside = x < 0 || y < 0 || z < 0 || x >= grid.nx as i64 || y >= grid.ny as i64 || z >= grid.nz as i64;
+                                    if outside || grid.scale[(z as usize * grid.ny + y as usize) * grid.nx + x as usize] <= 0.0 {
+                                        near_surface = true;
+                                        break 'scan;
+                                    }
+                                }
+                            }
+                        }
+                        if near_surface {
+                            fixed[ci] = keep as i16;
+                        }
+                    }
+                }
+            }
+        }
         let mut excluded = near_bc.clone();
         for cz in 0..grid.nz {
             for cy in 0..grid.ny {
@@ -5551,6 +5615,7 @@ impl Model {
         cfg.filter_radius_cells = opts.filter_radius.clamp(1.0, 4.0);
         cfg.max_iter = opts.max_iter.clamp(5, 1000);
         cfg.fixed_material = fixed;
+        cfg.layer_bond = if opts.layer_adhesion { Some(opts.bond_factor.clamp(0.05, 1.0)) } else { None };
         cfg.risk_mask = risk_mask.clone();
         for (m, mf) in opts.max_fraction.iter().enumerate().take(nm) {
             if let Some(f) = mf {
@@ -5573,13 +5638,26 @@ impl Model {
             .map_err(err)?;
         let best = &res.best;
 
+        self.mm_field = Some(MmField {
+            nx: grid.nx,
+            ny: grid.ny,
+            nz: grid.nz,
+            h: grid.h,
+            origin: grid.origin,
+            scale: grid.scale.clone(),
+            id: best.map.id.clone(),
+        });
         // Region meshes per material for the viewport (chosen design).
         self.mm_regions.clear();
         for m in 0..nm {
             if best.metrics.volume_fractions[m] <= 0.0 {
                 continue;
             }
-            let mut r = extract_region_smooth(&grid, &|ci| grid.scale[ci] > 0.0 && best.map.id[ci] as usize == m, 0.45);
+            // Each region is blurred and contoured on its own, so neighbouring regions
+            // overlap by a fraction of a cell. Display only: grow the keep material
+            // (it forms the skin) and shrink the others so they cannot poke through it.
+            let iso = if m == keep { 0.40 } else { 0.62 };
+            let mut r = extract_region_smooth(&grid, &|ci| grid.scale[ci] > 0.0 && best.map.id[ci] as usize == m, iso);
             r.density = m as f64;
             if !r.indices.is_empty() {
                 self.mm_regions.push((m as u8, r));
@@ -5606,6 +5684,66 @@ impl Model {
             "budgetUsage": res.primary.budget_usage,
         });
         Ok(out.to_string())
+    }
+
+    /// Mesh view of the analysis grid coloured by the last multi-material
+    /// result: `[hull f32 (9/tri), materialId f32 (3/tri), edges f32]`, cut
+    /// like `voxel_mesh_cut`. Errors if there is no result yet.
+    pub fn voxel_mesh_mm(&mut self, cut: bool, nx: f64, ny: f64, nz: f64, constant: f64) -> Result<js_sys::Array, JsValue> {
+        self.ensure_grid()?;
+        let f = self.mm_field.as_ref().ok_or_else(|| err("no multi-material result"))?;
+        let (grid, _) = self.grid.as_ref().unwrap();
+        let (gnx, gny) = (grid.nx, grid.ny);
+        let (h, o) = (grid.h, grid.origin);
+        let keep = move |ci: usize| -> bool {
+            if !cut {
+                return true;
+            }
+            let (cx, cy, cz) = (ci % gnx, (ci / gnx) % gny, ci / (gnx * gny));
+            nx * (o[0] + (cx as f64 + 0.5) * h) + ny * (o[1] + (cy as f64 + 0.5) * h) + nz * (o[2] + (cz as f64 + 0.5) * h) + constant >= 0.0
+        };
+        let (tris, edges, cell_of_tri) = grid.surface_mesh_where(&keep);
+        // Material of an analysis cell = material of the run-grid cell holding
+        // its centre; a void run-grid cell borrows its nearest solid neighbour.
+        let lookup = |ci: usize| -> f32 {
+            let (cx, cy, cz) = (ci % gnx, (ci / gnx) % gny, ci / (gnx * gny));
+            let p = [o[0] + (cx as f64 + 0.5) * h, o[1] + (cy as f64 + 0.5) * h, o[2] + (cz as f64 + 0.5) * h];
+            let ix = ((p[0] - f.origin[0]) / f.h).floor() as i64;
+            let iy = ((p[1] - f.origin[1]) / f.h).floor() as i64;
+            let iz = ((p[2] - f.origin[2]) / f.h).floor() as i64;
+            let at = |x: i64, y: i64, z: i64| -> Option<u8> {
+                if x < 0 || y < 0 || z < 0 || x >= f.nx as i64 || y >= f.ny as i64 || z >= f.nz as i64 {
+                    return None;
+                }
+                let k = (z as usize * f.ny + y as usize) * f.nx + x as usize;
+                if f.scale[k] > 0.0 { Some(f.id[k]) } else { None }
+            };
+            if let Some(m) = at(ix, iy, iz) {
+                return m as f32;
+            }
+            for r in 1..=2i64 {
+                for dz in -r..=r {
+                    for dy in -r..=r {
+                        for dx in -r..=r {
+                            if let Some(m) = at(ix + dx, iy + dy, iz + dz) {
+                                return m as f32;
+                            }
+                        }
+                    }
+                }
+            }
+            0.0
+        };
+        let mut mat = Vec::with_capacity(cell_of_tri.len() * 3);
+        for &c in &cell_of_tri {
+            let m = lookup(c as usize);
+            mat.extend_from_slice(&[m, m, m]);
+        }
+        Ok(js_sys::Array::of3(
+            &js_sys::Float32Array::from(tris.as_slice()),
+            &js_sys::Float32Array::from(mat.as_slice()),
+            &js_sys::Float32Array::from(edges.as_slice()),
+        ))
     }
 
     pub fn mm_region_count(&self) -> u32 {

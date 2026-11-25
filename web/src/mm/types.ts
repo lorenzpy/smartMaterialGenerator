@@ -11,6 +11,8 @@ export interface MmOptions {
     density: number;
     stressAllow?: number;
     strainAllow?: number;
+    /** Allowable tension across the printed layers (layer adhesion). */
+    stressAllowZ?: number;
   }[];
   wCompliance: number;
   wRisk: number;
@@ -24,6 +26,13 @@ export interface MmOptions {
   multiStart: boolean;
   /** Solid cells of this run's own grid. */
   cells: number;
+  /** Printed skin (mm): the keep material covers this depth, so the other
+   *  materials stay inside the part. 0 = off. */
+  skinMm: number;
+  /** Check tension across the build layers and the bond between materials. */
+  layerAdhesion: boolean;
+  /** Bond strength between different materials relative to the weaker one. */
+  bondFactor: number;
 }
 
 export interface MmProgress {
@@ -109,6 +118,14 @@ export interface MmSettings {
   maxIter: number;
   filterRadius: number;
   multiStart: boolean;
+  /** Keep the printed skin (walls from Properties) in the keep material, so the
+   *  other materials sit inside the part. */
+  skin: boolean;
+  /** Include layer adhesion (z = build direction) in the failure index. */
+  layerAdhesion: boolean;
+  /** Bond between different materials in % of the weaker material's layer
+   *  strength. */
+  bondPercent: number;
 }
 
 export const defaultMmSettings = (): MmSettings => ({
@@ -123,6 +140,9 @@ export const defaultMmSettings = (): MmSettings => ({
   maxIter: 120,
   filterRadius: 1.5,
   multiStart: false,
+  skin: true,
+  layerAdhesion: true,
+  bondPercent: 60,
 });
 
 /** Merge a stored/partial object into valid settings (unknown keys dropped). */
@@ -148,5 +168,8 @@ export function sanitizeMm(raw: unknown): MmSettings {
     maxIter: n(r.maxIter, 5, 1000, d.maxIter),
     filterRadius: n(r.filterRadius, 1, 4, d.filterRadius),
     multiStart: r.multiStart === true,
+    skin: r.skin !== false,
+    layerAdhesion: r.layerAdhesion !== false,
+    bondPercent: n(r.bondPercent, 5, 100, d.bondPercent),
   };
 }

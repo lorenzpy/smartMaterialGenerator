@@ -602,6 +602,12 @@ export class Model {
      */
     voxel_mesh_cut(cut: boolean, nx: number, ny: number, nz: number, constant: number, wall_mm: number, top_bottom_mm: number, infill_pct: number): Array<any>;
     /**
+     * Mesh view of the analysis grid coloured by the last multi-material
+     * result: `[hull f32 (9/tri), materialId f32 (3/tri), edges f32]`, cut
+     * like `voxel_mesh_cut`. Errors if there is no result yet.
+     */
+    voxel_mesh_mm(cut: boolean, nx: number, ny: number, nz: number, constant: number): Array<any>;
+    /**
      * Result field on the voxel hull: one value per hull vertex (3 per
      * triangle). Default: each triangle carries its OWNING CELL's value —
      * crisp per-cell coloring. With smooth_stress on, every hull vertex IS
@@ -759,6 +765,7 @@ export interface InitOutput {
     readonly model_voxel_hull: (a: number) => [number, number, number, number];
     readonly model_voxel_info: (a: number) => [number, number, number, number];
     readonly model_voxel_mesh_cut: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
+    readonly model_voxel_mesh_mm: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly model_voxel_result_field: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly model_voxel_results: (a: number, b: number) => [number, number, number];
     readonly project_manifest: (a: number, b: number) => [number, number, number, number];

@@ -38,6 +38,8 @@ pub struct CellFields {
     pub vm: Vec<f32>,
     /// Stress-equivalent strain `σ_vm / E_material` (dimensionless).
     pub eq_strain: Vec<f32>,
+    /// Normal stress σzz (MPa), z = build direction.
+    pub szz: Vec<f32>,
 }
 
 /// Cell-center stress/strain from a nodal displacement field `u` (f32, three
@@ -50,6 +52,7 @@ pub fn cell_fields(grid: &VoxelGrid, u: &[f32], map: &MaterialMap) -> CellFields
     let inv4h = 1.0 / (4.0 * grid.h);
     let mut vm = vec![0f32; nx * ny * nz];
     let mut eq = vec![0f32; nx * ny * nz];
+    let mut szz_out = vec![0f32; nx * ny * nz];
     for cz in 0..nz {
         for cy in 0..ny {
             for cx in 0..nx {
@@ -84,10 +87,11 @@ pub fn cell_fields(grid: &VoxelGrid, u: &[f32], map: &MaterialMap) -> CellFields
                     .sqrt();
                 vm[ci] = v as f32;
                 eq[ci] = (v / m.e) as f32;
+                szz_out[ci] = szz as f32;
             }
         }
     }
-    CellFields { vm, eq_strain: eq }
+    CellFields { vm, eq_strain: eq, szz: szz_out }
 }
 
 #[derive(Clone, Debug)]

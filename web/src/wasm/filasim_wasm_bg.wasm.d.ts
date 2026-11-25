@@ -97,6 +97,7 @@ export const model_voxel_edges: (a: number) => [number, number, number, number];
 export const model_voxel_hull: (a: number) => [number, number, number, number];
 export const model_voxel_info: (a: number) => [number, number, number, number];
 export const model_voxel_mesh_cut: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
+export const model_voxel_mesh_mm: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
 export const model_voxel_result_field: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const model_voxel_results: (a: number, b: number) => [number, number, number];
 export const project_manifest: (a: number, b: number) => [number, number, number, number];

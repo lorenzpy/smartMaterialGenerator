@@ -439,6 +439,14 @@ export class EngineClient {
     return this.call({ op: "voxelMeshCut", plane, wall, topBottomMm, infillPct });
   }
 
+  /** Mesh view coloured by the last multi-material result: per-vertex material
+   *  index, optionally cut like `voxelMeshCut`. */
+  voxelMeshMm(
+    plane: { normal: [number, number, number]; constant: number } | null
+  ): Promise<{ hull: Float32Array; material: Float32Array; edges: Float32Array; info: VoxelInfo }> {
+    return this.call({ op: "voxelMeshMm", plane });
+  }
+
   /** Isosurface of the final continuous density field at `threshold` (0..1). */
   densityShape(
     threshold: number

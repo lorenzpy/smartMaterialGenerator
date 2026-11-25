@@ -2005,6 +2005,8 @@ export interface SceneEvents {
   onMeshDensity?: (on: boolean) => void;
   /** Force the density ramp on mesh cells (inherent-strain layer view). */
   onMeshFieldColor?: (on: boolean) => void;
+  /** Multi-material fork: colour Mesh-view cells by material (palette; null = off). */
+  onMeshMaterials?: (palette: string[] | null) => void;
   /** Toggle the triangle-mesh wireframe overlay on the model. */
   onWireframe?: (on: boolean) => void;
   /** Toggle crease-aware smooth shading. */
@@ -3117,9 +3119,33 @@ async function pushSnap(get: () => AppState) {
 /** (Re)build the Mesh-view voxel hull: full, or voxel-true cut by the
  *  section plane (whole cells dropped — the interior cells become visible,
  *  so the skin thickness can be inspected instead of a planar cut). */
+/** Palette (hex per material index) of the last multi-material run; null = none. */
+let mmPalette: string[] | null = null;
+
 async function refreshMeshView(set: SetState, get: () => AppState): Promise<boolean> {
   const st = get();
   if (!st.model || st.viewMode !== "mesh") return true;
+  // Multi-material fork: with a result present, the Mesh view colours every
+  // cell by its material (voxel-true section included). The density tint
+  // toggle and the strain view keep priority when the user turned them on.
+  if (!st.strainView && !st.meshDensity && st.mm.enabled && st.mmRun.summary && mmPalette) {
+    try {
+      const cutting = st.sectionOn && lastSectionPlane !== null;
+      const { hull, edges, material, info } = await engine.voxelMeshMm(cutting ? lastSectionPlane : null);
+      if (get().viewMode !== "mesh") return true;
+      set({ voxelInfo: info, voxelMeshReady: true });
+      sceneEvents.onVoxelCutActive?.(cutting);
+      sceneEvents.onMeshFieldColor?.(false);
+      sceneEvents.onMeshMaterials?.(mmPalette);
+      sceneEvents.onVoxelMesh?.(hull, edges, material);
+      return true;
+    } catch (e) {
+      sceneEvents.onMeshMaterials?.(null);
+      set({ error: e instanceof Error ? e.message : String(e) });
+      return false;
+    }
+  }
+  sceneEvents.onMeshMaterials?.(null);
   // Inherent-strain layer view: voxel hull up to the scrubbed build layer,
   // cells colored by their per-element strain source (∝ density). Uses the
   // material shrink (XY/Z) to scale the reported source magnitude.
@@ -3177,6 +3203,7 @@ async function refreshMeshView(set: SetState, get: () => AppState): Promise<bool
 async function prebuildMeshView(set: SetState, get: () => AppState) {
   const st = get();
   if (!st.model || st.voxelMeshReady) return;
+  if (st.mm.enabled && st.mmRun.summary) return; // built lazily with material colours
   const wall = st.perimeters * st.lineWidth;
   try {
     const { hull, edges, density, info } = await engine.voxelMeshCut(
@@ -4679,6 +4706,8 @@ export const useStore = create<AppState>((set, get) => ({
       sceneEvents.onVoxelMesh?.(null, null);
       sceneEvents.onOptShape?.(null, null);
       mmParts = null;
+      mmPalette = null;
+      sceneEvents.onMeshMaterials?.(null);
       sceneEvents.onMultiMaterial?.(null);
       set({ mmRun: emptyMmRun() });
       sceneEvents.onModelLoaded?.(model);
@@ -4803,8 +4832,11 @@ export const useStore = create<AppState>((set, get) => ({
 
   clearMultiMaterial() {
     mmParts = null;
+    mmPalette = null;
     sceneEvents.onMultiMaterial?.(null);
-    set({ mmRun: emptyMmRun() });
+    sceneEvents.onMeshMaterials?.(null);
+    set({ mmRun: emptyMmRun(), voxelMeshReady: false });
+    if (get().viewMode === "mesh") void refreshMeshView(set, get);
   },
 
   async runMultiMaterial() {
@@ -4831,6 +4863,9 @@ export const useStore = create<AppState>((set, get) => ({
         density: m.density,
         stressAllow: (isIsotropic(m) ? m.yieldStrength : m.strength) || undefined,
         strainAllow: m.strainAtRupture && m.strainAtRupture > 0 ? m.strainAtRupture : undefined,
+        // Across the layers: interlayer strength of printed materials, the
+        // yield strength of isotropic ones (no layers).
+        stressAllowZ: (isIsotropic(m) ? m.yieldStrength : m.strengthZ) || undefined,
       })),
       wCompliance: st.mm.wCompliance,
       wRisk: st.mm.wRisk,
@@ -4844,6 +4879,9 @@ export const useStore = create<AppState>((set, get) => ({
       maxIter: st.mm.maxIter,
       multiStart: st.mm.multiStart,
       cells: st.mm.cells,
+      skinMm: st.mm.skin ? st.perimeters * st.lineWidth : 0,
+      layerAdhesion: st.mm.layerAdhesion,
+      bondFactor: st.mm.bondPercent / 100,
     };
     const colors: Record<string, string> = {};
     mats.forEach((m, i) => (colors[m.name] = mmColor(i)));
@@ -4860,8 +4898,11 @@ export const useStore = create<AppState>((set, get) => ({
         positions: r.positions,
         indices: r.indices,
       }));
-      set((cur) => ({ mmRun: { ...cur.mmRun, running: false, summary: out.summary, stale: false } }));
+      mmPalette = mats.map((_, i) => mmColor(i));
+      set((cur) => ({ mmRun: { ...cur.mmRun, running: false, summary: out.summary, stale: false }, voxelMeshReady: false }));
       if (get().activeStep === 5) sceneEvents.onMultiMaterial?.(mmParts);
+      // Mesh view: cells coloured by material (rebuilt on next entry, or now).
+      if (get().viewMode === "mesh") await refreshMeshView(set, get);
     } catch (e) {
       set((cur) => ({ mmRun: { ...cur.mmRun, running: false, error: e instanceof Error ? e.message : String(e) } }));
     }

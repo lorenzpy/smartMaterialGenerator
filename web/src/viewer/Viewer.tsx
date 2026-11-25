@@ -109,6 +109,7 @@ export function Viewer() {
     sceneEvents.onPeelMap = (p, v, max) => scene.setPeelMap(p, v, max);
     sceneEvents.onMeshDensity = (on) => scene.setMeshDensity(on);
     sceneEvents.onMeshFieldColor = (on) => scene.setMeshFieldColor(on);
+    sceneEvents.onMeshMaterials = (pal) => scene.setMeshMaterials(pal);
     sceneEvents.onWireframe = (on) => scene.setWireframe(on);
     sceneEvents.onSmoothShading = (on) => scene.setSmoothShading(on);
     sceneEvents.onFeatureEdges = (on) => scene.setFeatureEdges(on);

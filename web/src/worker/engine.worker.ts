@@ -305,6 +305,17 @@ self.onmessage = async (ev: MessageEvent<EngineWorkerRequest>) => {
         reply(msg, { hull, density, edges, info }, [hull.buffer, density.buffer, edges.buffer]);
         return;
       }
+      case "voxelMeshMm": {
+        const m = requireModel();
+        const p = msg.plane;
+        const arr = m.voxel_mesh_mm(p !== null, p?.normal[0] ?? 0, p?.normal[1] ?? 0, p?.normal[2] ?? 0, p?.constant ?? 0);
+        const hull = arr[0] as Float32Array;
+        const material = arr[1] as Float32Array;
+        const edges = arr[2] as Float32Array;
+        const info = JSON.parse(m.voxel_info());
+        reply(msg, { hull, material, edges, info }, [hull.buffer, material.buffer, edges.buffer]);
+        return;
+      }
       case "check": {
         const report = JSON.parse(requireModel().check());
         reply(msg, report);

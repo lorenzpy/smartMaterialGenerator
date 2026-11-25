@@ -141,6 +141,8 @@ export function StepOptimizeMulti() {
       busy: s.busy,
       setActiveStep: s.setActiveStep,
       bcs: s.bcs,
+      perimeters: s.perimeters,
+      lineWidth: s.lineWidth,
     }))
   );
   const { mm, mmRun } = s;
@@ -219,6 +221,42 @@ export function StepOptimizeMulti() {
           </>
         )}
       </Section>
+
+      {mats.length >= 2 && (
+        <Section
+          title="Printing"
+          badge={[mm.skin ? "skin" : "", mm.layerAdhesion ? "layers" : ""].filter(Boolean).join(" + ") || "off"}
+        >
+          <label
+            className="checkrow"
+            title="The walls from Properties are printed in the material kept at supports and loads, so the other materials sit inside the part"
+          >
+            <input type="checkbox" checked={mm.skin} onChange={(e) => s.setMm({ skin: e.target.checked })} />
+            <span>
+              Printed skin stays {mm.keepName || mats[0].name} ({(s.perimeters * s.lineWidth).toFixed(1)} mm)
+            </span>
+          </label>
+          <label
+            className="checkrow"
+            title="Adds tension across the printed layers (z) against each material's interlayer strength, and a weaker bond where two different materials meet along z"
+          >
+            <input type="checkbox" checked={mm.layerAdhesion} onChange={(e) => s.setMm({ layerAdhesion: e.target.checked })} />
+            <span>Layer adhesion (z = build direction)</span>
+          </label>
+          {mm.layerAdhesion && (
+            <div className="group">
+              <div className="g-label">
+                <span>Bond between different materials (%)</span>
+              </div>
+              <NumInput value={mm.bondPercent} step={5} min={5} max={100} onCommit={(v) => s.setMm({ bondPercent: v })} />
+              <div className="dim small">
+                Strength of an interface between two materials relative to the weaker one. Use a measured value; 60 is a
+                test value.
+              </div>
+            </div>
+          )}
+        </Section>
+      )}
 
       {mats.length >= 2 && (
         <Section title="Run settings" badge={`${mm.cells} cells · ${mm.maxIter} it`}>

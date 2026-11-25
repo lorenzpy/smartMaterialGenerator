@@ -1550,6 +1550,24 @@ export class Model {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * Mesh view of the analysis grid coloured by the last multi-material
+     * result: `[hull f32 (9/tri), materialId f32 (3/tri), edges f32]`, cut
+     * like `voxel_mesh_cut`. Errors if there is no result yet.
+     * @param {boolean} cut
+     * @param {number} nx
+     * @param {number} ny
+     * @param {number} nz
+     * @param {number} constant
+     * @returns {Array<any>}
+     */
+    voxel_mesh_mm(cut, nx, ny, nz, constant) {
+        const ret = wasm.model_voxel_mesh_mm(this.__wbg_ptr, cut, nx, ny, nz, constant);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * Result field on the voxel hull: one value per hull vertex (3 per
      * triangle). Default: each triangle carries its OWNING CELL's value —
      * crisp per-cell coloring. With smooth_stress on, every hull vertex IS

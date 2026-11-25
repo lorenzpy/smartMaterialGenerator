@@ -94,6 +94,8 @@ export interface EngineRequests {
      *  win when an optimization result exists). */
     infillPct: number;
   };
+  /** Multi-material fork: Mesh view coloured by the last mm result. */
+  voxelMeshMm: { plane: { normal: [number, number, number]; constant: number } | null };
   check: Empty;
   solve: Empty;
   solveOptimized: Empty;
@@ -236,6 +238,7 @@ export interface EngineResponses {
   voxelInfo: VoxelInfo;
   voxelMesh: { hull: Float32Array; edges: Float32Array; info: VoxelInfo };
   voxelMeshCut: { hull: Float32Array; density: Float32Array; edges: Float32Array; info: VoxelInfo };
+  voxelMeshMm: { hull: Float32Array; material: Float32Array; edges: Float32Array; info: VoxelInfo };
   check: CheckReport;
   solve: SolveResult;
   solveOptimized: SolveResult;

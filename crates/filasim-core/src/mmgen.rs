@@ -117,6 +117,12 @@ pub struct MgContext<'a> {
     lm: Vec<(f64, f64)>,
     /// `1/σ_eff` per material (0 = no limit).
     inv_sig: Vec<f64>,
+    /// `1/σ_z` per material: allowable tension across layers (0 = no limit).
+    inv_sigz: Vec<f64>,
+    /// Layer-adhesion check on (grid z is the build direction).
+    layer_on: bool,
+    /// Bond factor κ in (0,1] between DIFFERENT materials in z-neighbour cells.
+    bond: f64,
     b: [[f64; 24]; 6],
     occ: Vec<f64>,
     /// Cells counted in the risk (solid and not excluded).
@@ -188,6 +194,12 @@ impl<'a> MgContext<'a> {
                     if s.is_finite() && s > 0.0 { 1.0 / s } else { 0.0 }
                 })
                 .collect(),
+            inv_sigz: t
+                .iter()
+                .map(|m| if m.stress_allow_z.is_finite() && m.stress_allow_z > 0.0 { 1.0 / m.stress_allow_z } else { 0.0 })
+                .collect(),
+            layer_on: false,
+            bond: 1.0,
             b,
             occ,
             mask,
@@ -209,15 +221,54 @@ impl<'a> MgContext<'a> {
     /// linear average would let the optimizer hide soft, weak material behind
     /// a strong-looking gray cell). Returns the value and `d/dρ_m`.
     fn inv_allow(&self, rho: &[f64], ci: usize) -> (f64, Vec<f64>) {
+        self.softmax_inv(rho, ci, &self.inv_sig)
+    }
+
+    fn softmax_inv(&self, rho: &[f64], ci: usize, w: &[f64]) -> (f64, Vec<f64>) {
         let nm = self.n_mat;
         let k = MIX_K;
-        let s: f64 = (0..nm).map(|m| rho[ci * nm + m].clamp(RHO_MIN, 1.0) * self.inv_sig[m].powf(k)).sum();
+        let s: f64 = (0..nm).map(|m| rho[ci * nm + m].clamp(RHO_MIN, 1.0) * w[m].powf(k)).sum();
         if s <= 0.0 {
             return (0.0, vec![0.0; nm]);
         }
         let inv = s.powf(1.0 / k);
         let pref = s.powf(1.0 / k - 1.0) / k;
-        (inv, (0..nm).map(|m| pref * self.inv_sig[m].powf(k)).collect())
+        (inv, (0..nm).map(|m| pref * w[m].powf(k)).collect())
+    }
+
+    /// Switch the layer-adhesion check on. `bond` is the strength factor κ of
+    /// an interface between two different materials relative to the weaker
+    /// one (1 = as strong as the weaker material itself).
+    pub fn set_layer_adhesion(&mut self, on: bool, bond: f64) {
+        self.layer_on = on;
+        self.bond = bond.clamp(0.05, 1.0);
+    }
+
+    /// z-neighbours (up, down) of a cell that are solid.
+    fn z_neighbours(&self, ci: usize) -> (Option<usize>, Option<usize>) {
+        let g = self.grid;
+        let nxy = g.nx * g.ny;
+        let cz = ci / nxy;
+        let up = if cz + 1 < g.nz && self.occ[ci + nxy] > 0.0 { Some(ci + nxy) } else { None };
+        let dn = if cz > 0 && self.occ[ci - nxy] > 0.0 { Some(ci - nxy) } else { None };
+        (up, dn)
+    }
+
+    /// Layer-adhesion inverse allowable of a cell:
+    /// `invZ = softmax(1/σ_z) · (1 + (1/κ − 1) D)`, with the interface measure
+    /// `D = ½ Σ_n (1 − Σ_m ρ_m ρ_{n,m})` over the solid z-neighbours (0 for a
+    /// uniform column, 1 across a sharp interface). Returns
+    /// `(invZ, mix, dmix, D, up, dn)`.
+    fn inv_layer(&self, rho: &[f64], ci: usize) -> (f64, f64, Vec<f64>, f64, Option<usize>, Option<usize>) {
+        let nm = self.n_mat;
+        let (mix, dmix) = self.softmax_inv(rho, ci, &self.inv_sigz);
+        let (up, dn) = self.z_neighbours(ci);
+        let mut d = 0.0;
+        for nb in [up, dn].into_iter().flatten() {
+            let same: f64 = (0..nm).map(|m| rho[ci * nm + m] * rho[nb * nm + m]).sum();
+            d += 0.5 * (1.0 - same);
+        }
+        (mix * (1.0 + (1.0 / self.bond - 1.0) * d), mix, dmix, d, up, dn)
     }
 
     fn gather(&self, u: &[f64], ci: usize) -> [f64; 24] {
@@ -316,8 +367,13 @@ impl<'a> MgContext<'a> {
             if !self.mask[ci] {
                 continue;
             }
-            let (vm, _, inv_s, _) = self.stress_state(rho, ci, p);
-            let f = vm * inv_s;
+            let (vm, sg, inv_s, _) = self.stress_state(rho, ci, p);
+            let mut f2 = (vm * inv_s).powi(2);
+            if self.layer_on {
+                let t = sg[2].max(0.0);
+                f2 += (t * self.inv_layer(rho, ci).0).powi(2);
+            }
+            let f = f2.sqrt();
             fvals[ci] = f;
             fmax = fmax.max(f);
             sum += g.scale[ci] as f64 * f.powf(q);
@@ -360,19 +416,42 @@ impl<'a> MgContext<'a> {
             let vm = dot(&sigma, &ps).max(1e-30).sqrt();
             let dir = [ps[0] / vm, ps[1] / vm, ps[2] / vm, ps[3] / vm, ps[4] / vm, ps[5] / vm];
             let (inv_s, dinv) = self.inv_allow(rho, ci);
+            // Layer adhesion: f² = (vm·invS)² + (t·invZ)², t = max(σzz, 0).
+            let t = if self.layer_on { sigma[2].max(0.0) } else { 0.0 };
+            let lay = if self.layer_on { Some(self.inv_layer(rho, ci)) } else { None };
+            let inv_z = lay.as_ref().map(|l| l.0).unwrap_or(0.0);
+            let fv = fvals[ci];
+            let a1 = vm * inv_s * inv_s / fv; // weight of ∂vm
+            let a2 = if t > 0.0 { t * inv_z * inv_z / fv } else { 0.0 }; // weight of ∂t
             for k in 0..nm {
-                let dvm = if k == self.bg {
-                    0.0
+                let (dvm, dt) = if k == self.bg {
+                    (0.0, 0.0)
                 } else {
                     let mut diff = [0f64; 6];
                     for r in 0..6 {
                         diff[r] = s_m[k][r] - s_m[self.bg][r];
                     }
-                    self.dphi(rho, ci, k, p) * dot(&dir, &diff)
+                    let dp = self.dphi(rho, ci, k, p);
+                    (dp * dot(&dir, &diff), if t > 0.0 { dp * diff[2] } else { 0.0 })
                 };
-                grad_r[ci * nm + k] += c_i * (dvm * inv_s + vm * dinv[k]);
+                let mut gk = a1 * dvm + vm * vm * inv_s * dinv[k] / fv;
+                if let Some((_, mix, dmix, dd, up, dn)) = lay.as_ref() {
+                    let fac = 1.0 + (1.0 / self.bond - 1.0) * dd;
+                    let mut dd_k = 0.0;
+                    for nb in [up, dn].into_iter().flatten() {
+                        dd_k += -0.5 * rho[nb * nm + k];
+                        // neighbour's own share enters D as well
+                        if t > 0.0 {
+                            let dinvz_nb = mix * (1.0 / self.bond - 1.0) * (-0.5 * rho[ci * nm + k]);
+                            grad_r[nb * nm + k] += c_i * t * t * inv_z * dinvz_nb / fv;
+                        }
+                    }
+                    let dinvz = dmix[k] * fac + mix * (1.0 / self.bond - 1.0) * dd_k;
+                    gk += a2 * dt + t * t * inv_z * dinvz / fv;
+                }
+                grad_r[ci * nm + k] += c_i * gk;
             }
-            // adjoint load: c_i * invS * Bᵀ (C_eff dir)
+            // adjoint load: c_i · ∂f/∂u = c_i · Bᵀ C_eff (a1·dir + a2·e_z)
             let mut ceff = [[0f64; 6]; 6];
             for k in 0..nm {
                 for a in 0..6 {
@@ -381,7 +460,9 @@ impl<'a> MgContext<'a> {
                     }
                 }
             }
-            let w = mv6(&ceff, &dir);
+            let mut dirz = [a1 * dir[0], a1 * dir[1], a1 * dir[2], a1 * dir[3], a1 * dir[4], a1 * dir[5]];
+            dirz[2] += a2;
+            let w = mv6(&ceff, &dirz);
             let (cx, cy, cz) = (ci % g.nx, (ci / g.nx) % g.ny, ci / (g.nx * g.ny));
             for l in 0..8 {
                 let [ox, oy, oz] = NODE_OFFSETS[l];
@@ -391,7 +472,7 @@ impl<'a> MgContext<'a> {
                     for r in 0..6 {
                         s += self.b[r][3 * l + d] * w[r];
                     }
-                    gload[3 * nd + d] += c_i * inv_s * s;
+                    gload[3 * nd + d] += c_i * s;
                 }
             }
         }
@@ -511,6 +592,23 @@ pub fn evaluate_design(
     q: f64,
     base: SolveSettings,
 ) -> Result<Metrics, String> {
+    evaluate_design_layered(grid, levels, problem, map, risk_mask, q, base, None)
+}
+
+/// [`evaluate_design`] with an optional layer-adhesion check: `layer =
+/// Some(bond)` adds the tension across layers (σzz, grid z = build direction)
+/// against each material's `stress_allow_z`, reduced by the bond factor where
+/// a z-neighbour is a different material. Same failure index as the optimizer.
+pub fn evaluate_design_layered(
+    grid: &VoxelGrid,
+    levels: usize,
+    problem: &NodeProblem,
+    map: &MaterialMap,
+    risk_mask: &[bool],
+    q: f64,
+    base: SolveSettings,
+    layer: Option<f64>,
+) -> Result<Metrics, String> {
     let (field, settings) = map.solver_inputs(grid, base).map_err(|e| format!("{e:?}"))?;
     let r = solve_cached(&mut None, grid, levels, problem, &settings, field, settings.tol, settings.max_iter)
         .map_err(|e| format!("{e}"))?;
@@ -523,7 +621,22 @@ pub fn evaluate_design(
             continue;
         }
         let s = map.table[map.id[i] as usize].sigma_eff();
-        let fi = if s.is_finite() && s > 0.0 { f.vm[i] as f64 / s } else { 0.0 };
+        let mut fi = if s.is_finite() && s > 0.0 { f.vm[i] as f64 / s } else { 0.0 };
+        if let Some(bond) = layer {
+            let sz = map.table[map.id[i] as usize].stress_allow_z;
+            if sz.is_finite() && sz > 0.0 {
+                let (nxy, cz) = (grid.nx * grid.ny, i / (grid.nx * grid.ny));
+                let mut d = 0.0;
+                if cz + 1 < grid.nz && grid.scale[i + nxy] > 0.0 && map.id[i + nxy] != map.id[i] {
+                    d += 0.5;
+                }
+                if cz > 0 && grid.scale[i - nxy] > 0.0 && map.id[i - nxy] != map.id[i] {
+                    d += 0.5;
+                }
+                let tz = (f.szz[i] as f64).max(0.0) / sz * (1.0 + (1.0 / bond.clamp(0.05, 1.0) - 1.0) * d);
+                fi = (fi * fi + tz * tz).sqrt();
+            }
+        }
         vol += grid.scale[i] as f64;
         sum += grid.scale[i] as f64 * fi.powf(q);
         fmax = fmax.max(fi);
@@ -582,6 +695,9 @@ pub struct MgConfig {
     /// sums to 1). Empty = uniform. The result can depend on the start: the
     /// problem is non-convex.
     pub init_share: Vec<f64>,
+    /// Layer-adhesion check (grid z = build direction); `None` = off, `Some`
+    /// = bond factor κ between different materials in z-neighbour cells.
+    pub layer_bond: Option<f64>,
 }
 
 impl MgConfig {
@@ -606,6 +722,7 @@ impl MgConfig {
             inner_tol: 1e-4,
             inner_max_iter: 300,
             init_share: Vec::new(),
+            layer_bond: None,
         }
     }
 }
@@ -737,6 +854,7 @@ pub fn optimize_multi_material_with(
     inner.tol = cfg.inner_tol.max(base.tol);
     inner.max_iter = cfg.inner_max_iter.min(base.max_iter).max(10);
     let mut ctx = MgContext::new(grid, levels, problem, start, &cfg.risk_mask, inner)?;
+    ctx.set_layer_adhesion(cfg.layer_bond.is_some(), cfg.layer_bond.unwrap_or(1.0));
     let solid: Vec<usize> = (0..n).filter(|&i| grid.scale[i] > 0.0).collect();
     if solid.is_empty() {
         return Err("no solid cells".into());
@@ -1025,7 +1143,7 @@ pub fn optimize_multi_material_with(
             break;
         }
     }
-    let metrics = evaluate_design(grid, levels, problem, &map, &cfg.risk_mask, cfg.risk_exponent, base)?;
+    let metrics = evaluate_design_layered(grid, levels, problem, &map, &cfg.risk_mask, cfg.risk_exponent, base, cfg.layer_bond)?;
     let budget_usage_out = cfg
         .budgets
         .iter()
@@ -1131,7 +1249,7 @@ pub fn optimize_best_of(
         for &i in &solid {
             map.id[i] = m as u8;
         }
-        let mt = evaluate_design(grid, levels, problem, &map, &cfg.risk_mask, cfg.risk_exponent, base)?;
+        let mt = evaluate_design_layered(grid, levels, problem, &map, &cfg.risk_mask, cfg.risk_exponent, base, cfg.layer_bond)?;
         cands.push(score(format!("all {}", start.table[m].name), map, mt));
     }
     let best = cands
