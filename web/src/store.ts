@@ -2297,8 +2297,18 @@ async function applySdzSetup(set: SetState, get: () => AppState, strict = false)
     });
     const have = get().materials.findIndex((x) => x.name === m.name);
     set({ materials: have >= 0 ? get().materials.map((x, i) => (i === have ? m : x)) : [...get().materials, m] });
-    get().setMaterial(m);
-    materialNote = ` Material "${m.name}" (E ${mm.e0.toFixed(0)} MPa, ν ${mm.nu}).`;
+    // An isotropic material switches the app to shape optimization (Part Topo)
+    // and removes the infill modes. So an import never takes the selection
+    // away from a printable (FDM) material: the Fusion material is only added
+    // to the library and the user picks it in Properties if they want it.
+    if (isIsotropic(get().material)) {
+      get().setMaterial(m);
+      materialNote = ` Material "${m.name}" (E ${mm.e0.toFixed(0)} MPa, ν ${mm.nu}) gewählt.`;
+    } else {
+      materialNote =
+        ` Fusion-Material "${m.name}" (E ${mm.e0.toFixed(0)} MPa, ν ${mm.nu}) in die Materialliste aufgenommen, ` +
+        `aber nicht gewählt: Das aktuelle Material "${get().material.name}" bleibt, damit die Infill-Optimierung verfügbar ist.`;
+    }
   }
 
   set({
